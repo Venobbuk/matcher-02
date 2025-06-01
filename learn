@@ -1,0 +1,356 @@
+/* THIS IS THE ID AND NAME (636) intelligent learning 
+
+/**
+* KT Cigar Learning System - Pattern Recognition & Validation
+* Learns from successful extractions and improves future matching
+* Save as: wp-content/kt-cigar-learning-system.php
+*/
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+class KT_Cigar_Learning_System {
+    
+    private static $learning_db_table = 'kt_cigar_learning_patterns';
+    private static $validation_rules = array();
+    
+    public static function init() {
+        add_action('init', array(__CLASS__, 'create_learning_table'));
+        self::load_validation_rules();
+    }
+    
+    /**
+     * Create learning patterns database table
+     */
+    public static function create_learning_table() {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $sql = "CREATE TABLE IF NOT EXISTS $table_name (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            pattern_text varchar(255) NOT NULL,
+            pattern_type varchar(50) NOT NULL,
+            extracted_value varchar(255) NOT NULL,
+            extraction_method varchar(100) NOT NULL,
+            confidence_score decimal(3,2) DEFAULT 0.5,
+            success_count int(11) DEFAULT 1,
+            failure_count int(11) DEFAULT 0,
+            last_seen datetime DEFAULT CURRENT_TIMESTAMP,
+            created_at datetime DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY pattern_unique (pattern_text, pattern_type, extracted_value),
+            KEY pattern_type_idx (pattern_type),
+            KEY confidence_idx (confidence_score),
+            KEY success_idx (success_count)
+        )";
+        
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    }
+   
+    /**
+     * Learn from successful extraction
+     */
+    public static function learn_successful_pattern($pattern_text, $pattern_type, $extracted_value, $method) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        // ENHANCED FIX: Ultra-clean encoding before database operations
+        $pattern_text = mb_convert_encoding($pattern_text, 'UTF-8', 'UTF-8');
+        $extracted_value = mb_convert_encoding($extracted_value, 'UTF-8', 'UTF-8');
+
+       // REPLACE WITH:
+// Gentle cleaning - preserve Chinese characters
+$pattern_text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $pattern_text);
+$extracted_value = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $extracted_value);
+
+// Remove only obvious problematic characters, keep Chinese intact
+$pattern_text = str_replace(array("\0", "�"), '', $pattern_text);
+$extracted_value = str_replace(array("\0", "�"), '', $extracted_value);
+		
+        $pattern_text = trim(substr($pattern_text, 0, 200));
+        $extracted_value = trim(substr($extracted_value, 0, 200));
+        $pattern_type = sanitize_text_field($pattern_type);
+        $method = sanitize_text_field($method);
+
+        // Skip if cleaning resulted in empty values
+        if (empty($pattern_text) || empty($extracted_value)) {
+            return; // Silent skip
+        }
+        
+        try { // Fixed: Added missing opening brace
+            // Check if pattern exists with proper encoding
+            $existing = $wpdb->get_row($wpdb->prepare("
+                SELECT * FROM {$table_name}
+                WHERE pattern_text = %s AND pattern_type = %s AND extracted_value = %s
+            ", $pattern_text, $pattern_type, $extracted_value));
+            
+            if ($existing) {
+                // Update existing pattern
+                $new_success = $existing->success_count + 1;
+                $new_confidence = min(1.0, $new_success / ($new_success + $existing->failure_count));
+                
+                $wpdb->update($table_name, array(
+                    'success_count' => $new_success,
+                    'confidence_score' => $new_confidence,
+                    'last_seen' => current_time('mysql')
+                ), array('id' => $existing->id));
+          
+                self::write_learning_log("Updated pattern '$pattern_text' -> '$extracted_value' (confidence: $new_confidence)");
+            } else {
+                // Insert new pattern with proper encoding
+                $result = $wpdb->insert($table_name, array(
+                    'pattern_text' => $pattern_text,
+                    'pattern_type' => $pattern_type,
+                    'extracted_value' => $extracted_value,
+                    'extraction_method' => $method,
+                    'confidence_score' => 0.7,
+                    'success_count' => 1,
+                    'failure_count' => 0
+                ));
+                
+                if ($result === false) {
+                    self::write_learning_log("Failed to insert pattern");
+                    return;
+                }
+                
+                self::write_learning_log("New pattern learned");
+            }
+        } catch (Exception $e) {
+            self::write_learning_log("❌ Learning system error: " . $e->getMessage());
+            // Continue execution without crashing
+        }
+    }
+    
+    /**
+     * Record failed extraction attempt
+     */
+    public static function learn_failed_pattern($pattern_text, $pattern_type, $attempted_value) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $existing = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM $table_name 
+            WHERE pattern_text = %s AND pattern_type = %s AND extracted_value = %s
+        ", $pattern_text, $pattern_type, $attempted_value));
+        
+        if ($existing) {
+            $new_failure = $existing->failure_count + 1;
+            $new_confidence = $existing->success_count / ($existing->success_count + $new_failure);
+            
+            $wpdb->update($table_name, array(
+                'failure_count' => $new_failure,
+                'confidence_score' => $new_confidence,
+                'last_seen' => current_time('mysql')
+            ), array('id' => $existing->id));
+            
+            self::write_learning_log("❌ Pattern failed: '$pattern_text' -> '$attempted_value' (confidence: $new_confidence)");
+        }
+    }
+    
+    /**
+     * Get learned patterns for a specific type
+     */
+    public static function get_learned_patterns($pattern_type, $min_confidence = 0.5) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $patterns = $wpdb->get_results($wpdb->prepare("
+            SELECT * FROM $table_name 
+            WHERE pattern_type = %s AND confidence_score >= %f
+            ORDER BY confidence_score DESC, success_count DESC
+        ", $pattern_type, $min_confidence));
+        
+        return $patterns;
+    }
+    
+    /**
+     * Validate extraction using learned patterns
+     */
+    public static function validate_extraction($pattern_text, $pattern_type, $extracted_value) {
+        $learned_patterns = self::get_learned_patterns($pattern_type, 0.3);
+        
+        foreach ($learned_patterns as $pattern) {
+            if ($pattern->pattern_text === $pattern_text) {
+                if ($pattern->extracted_value === $extracted_value) {
+                    return array(
+                        'valid' => true,
+                        'confidence' => $pattern->confidence_score,
+                        'method' => 'learned_pattern'
+                    );
+                } else {
+                    return array(
+                        'valid' => false,
+                        'reason' => 'conflicts_with_learned_pattern',
+                        'learned_value' => $pattern->extracted_value
+                    );
+                }
+            }
+        }
+        
+        return array('valid' => 'unknown', 'confidence' => 0.5);
+    }
+    
+    /**
+     * Load validation rules
+     */
+    private static function load_validation_rules() {
+        self::$validation_rules = array(
+            'dimensions' => array(
+                'ring_gauge_min' => 20,
+                'ring_gauge_max' => 80,
+                'length_min' => 80,
+                'length_max' => 250
+            ),
+            'count' => array(
+                'min' => 1,
+                'max' => 1000,
+                'common_values' => array(1, 3, 5, 10, 12, 15, 20, 24, 25, 50, 100)
+            ),
+            'year' => array(
+                'min' => 1990,
+                'max' => date('Y') + 2
+            )
+        );
+    }
+    
+    /**
+     * Validate extraction against rules
+     */
+    public static function validate_against_rules($type, $value) {
+        switch ($type) {
+            case 'ring_gauge':
+                $rules = self::$validation_rules['dimensions'];
+                return ($value >= $rules['ring_gauge_min'] && $value <= $rules['ring_gauge_max']);
+                
+            case 'length':
+                $rules = self::$validation_rules['dimensions'];
+                return ($value >= $rules['length_min'] && $value <= $rules['length_max']);
+                
+            case 'count':
+                $rules = self::$validation_rules['count'];
+                return ($value >= $rules['min'] && $value <= $rules['max']);
+                
+            case 'year':
+                $rules = self::$validation_rules['year'];
+                return ($value >= $rules['min'] && $value <= $rules['max']);
+                
+            default:
+                return true; // No specific rules
+        }
+    }
+    
+    /**
+     * Get learning statistics
+     */
+    public static function get_learning_stats() {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $stats = $wpdb->get_results("
+            SELECT 
+                pattern_type,
+                COUNT(*) as total_patterns,
+                AVG(confidence_score) as avg_confidence,
+                SUM(success_count) as total_successes,
+                SUM(failure_count) as total_failures
+            FROM $table_name 
+            GROUP BY pattern_type
+            ORDER BY total_patterns DESC
+        ");
+        
+        return $stats;
+    }
+    
+    /**
+     * Clean old low-confidence patterns
+     */
+    public static function cleanup_patterns($min_confidence = 0.2, $min_successes = 2) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $deleted = $wpdb->query($wpdb->prepare("
+            DELETE FROM $table_name 
+            WHERE confidence_score < %f AND success_count < %d
+            AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+        ", $min_confidence, $min_successes));
+        
+        self::write_learning_log("🧹 Cleaned up $deleted low-confidence patterns");
+        return $deleted;
+    }
+    
+    /**
+     * Export learned patterns for backup
+     */
+    public static function export_patterns() {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$learning_db_table;
+        
+        $patterns = $wpdb->get_results("SELECT * FROM $table_name ORDER BY pattern_type, confidence_score DESC", ARRAY_A);
+        
+        $export_file = WP_CONTENT_DIR . '/cigar-learned-patterns-' . date('Y-m-d-H-i') . '.json';
+        file_put_contents($export_file, json_encode($patterns, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        
+        return $export_file;
+    }
+    
+    /**
+     * NEW METHOD: Sanitize text for learning system
+     */
+    private static function sanitize_for_learning($text) {
+        if (empty($text)) {
+            return '';
+        }
+        
+        // Step 1: Convert to proper UTF-8
+        $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+        
+        // Step 2: Remove null bytes and control characters
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
+        
+        // Step 3: Fix common encoding issues
+        $text = str_replace(array('�', '?'), '', $text);
+        
+        // Step 4: Normalize whitespace
+        $text = preg_replace('/\s+/', ' ', trim($text));
+        
+        // Step 5: Validate final result
+        if (!mb_check_encoding($text, 'UTF-8')) {
+            return ''; // Return empty if still invalid
+        }
+        
+        // Step 6: Limit length to prevent database issues
+        return mb_substr($text, 0, 250, 'UTF-8');
+    }
+
+    /**
+     * UPDATED: Write learning log with encoding safety
+     */
+    private static function write_learning_log($message) {
+        if (defined('KT_DEBUG') && KT_DEBUG) {
+            $log_file = WP_CONTENT_DIR . '/cigar-learning.log';
+            $timestamp = date('Y-m-d H:i:s');
+            
+            // Sanitize log message to prevent file corruption
+            $safe_message = self::sanitize_for_learning($message);
+            $log_message = "$timestamp - [LEARNING] $safe_message\n";
+            
+            file_put_contents($log_file, $log_message, FILE_APPEND | LOCK_EX);
+        }
+    }
+}
+
+// Initialize learning system
+KT_Cigar_Learning_System::init();
+
+// Integration hooks for main extraction system
+add_action('kt_cigar_extraction_success', array('KT_Cigar_Learning_System', 'learn_successful_pattern'), 10, 4);
+add_action('kt_cigar_extraction_failure', array('KT_Cigar_Learning_System', 'learn_failed_pattern'), 10, 3);
