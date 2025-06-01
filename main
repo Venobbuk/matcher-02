@@ -4020,41 +4020,50 @@ public function enqueue_admin_scripts($hook) {
         return;
     }
     
-    // Enqueue jQuery with highest priority
+    // Enqueue jQuery first
     wp_enqueue_script('jquery');
-    wp_script_add_data('jquery', 'group', 0);
     
-    // Create proper script handle for localization
-    wp_enqueue_script(
-        'kt-cigar-admin-js',
-        '', // No file needed
+    // Create a proper script handle
+    $script_handle = 'kt-cigar-admin-script';
+    
+    // Register our script with jQuery dependency
+    wp_register_script(
+        $script_handle,
+        '', // Empty URL since we'll add inline
         array('jquery'),
-        '2.0.0',
+        '2.0.1',
         false // Load in head
     );
     
-    // CRITICAL FIX: Localize to the correct script handle
-    wp_localize_script('kt-cigar-admin-js', 'ktCigarAjax', array(
+    // Enqueue the script
+    wp_enqueue_script($script_handle);
+    
+    // CRITICAL FIX: Localize to the registered script, not jQuery
+    wp_localize_script($script_handle, 'ktCigarAjax', array(
         'ajax_url' => admin_url('admin-ajax.php'),
         'nonce' => wp_create_nonce('kt_cigar_nonce'),
-        'upload_nonce' => wp_create_nonce('kt_cigar_upload_nonce'),
         'strings' => array(
             'confirm_delete' => 'Are you sure you want to delete this product?'
         )
     ));
     
-    // Add verification script
-    wp_add_inline_script('kt-cigar-admin-js', '
-        console.log("✅ KT Scripts loaded");
-        if (typeof ktCigarAjax !== "undefined") {
-            console.log("✅ ktCigarAjax available:", ktCigarAjax);
-        } else {
-            console.error("❌ ktCigarAjax not available");
-        }
+    // Add initialization check
+    wp_add_inline_script($script_handle, '
+        jQuery(document).ready(function($) {
+            console.log("Document ready - initializing KT Cigar Matcher");
+            console.log("ktCigarAjax available:", typeof ktCigarAjax !== "undefined");
+            
+            if (typeof ktCigarAjax === "undefined") {
+                console.error("ktCigarAjax not available - check script loading");
+                return;
+            }
+            
+            console.log("KT Cigar Matcher admin interface initialized");
+            console.log("ktCigarAjax available:", ktCigarAjax);
+        });
     ');
 }
 }
-
 
 
 
