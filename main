@@ -1,0 +1,4214 @@
+/* THIS IS THE ID AND NAME (633) main plugin 01 */
+/**
+* Plugin Name: KT Cigar Matcher
+* Description: Map supplier CSV data to master products with AI-powered matching
+* Version: 2.0.0
+* Author: Your Name
+*/
+
+if (!defined('ABSPATH')) {
+  exit;
+}
+
+define('KT_CIGAR_VERSION', '2.0.0');
+define('KT_CIGAR_DB_VERSION', '2.1');
+define('KT_DEBUG', true);
+
+class KT_Cigar_Matcher_Admin {
+  
+  private static $instance = null;
+  
+  public static function get_instance() {
+      if (null === self::$instance) {
+          self::$instance = new self();
+      }
+      return self::$instance;
+  }
+  
+  private function __construct() {
+      add_action('init', array($this, 'init'));
+      add_action('admin_menu', array($this, 'add_admin_menu'));
+      add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
+      
+      // Register AJAX actions
+      $this->register_ajax_actions();
+      
+      register_activation_hook(__FILE__, array($this, 'create_database_tables'));
+  }
+  
+ public function init() {
+    $this->ensure_kt_mappings_loaded();
+    
+    // INTEGRATE LEARNING SYSTEM
+    if (class_exists('KT_Cigar_Learning_System')) {
+        KT_Cigar_Learning_System::init();
+        $this->write_admin_log("Learning system integrated and initialized");
+    } else {
+        $this->write_admin_log("WARNING: Learning system not found - ensure paste-3.txt is active");
+    }
+    
+    $this->write_admin_log("KT Cigar Matcher initialized with master products and learning system");
+      
+      // Ensure database is up to date
+      $current_version = get_option('kt_cigar_db_version', '0');
+      if (version_compare($current_version, KT_CIGAR_DB_VERSION, '<')) {
+          $this->create_database_tables();
+      }
+  }
+  
+  public function create_database_tables() {
+    global $wpdb;
+    
+    $charset_collate = 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci';
+    
+    // ENHANCED supplier CSV data table
+    $supplier_table = $wpdb->prefix . 'kt_cigar_supplier_products';
+    
+    $sql1 = "CREATE TABLE $supplier_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        upload_batch_id varchar(50) NOT NULL,
+        supplier_sku varchar(100) DEFAULT NULL,
+        supplier_title text NOT NULL,
+        supplier_brand varchar(255) DEFAULT NULL,
+        supplier_price decimal(10,2) DEFAULT NULL,
+        supplier_price_display varchar(20) DEFAULT NULL,
+        supplier_quantity int(11) DEFAULT NULL,
+        supplier_description longtext DEFAULT NULL,
+        supplier_image_url varchar(500) DEFAULT NULL,
+        raw_csv_data longtext DEFAULT NULL,
+        extracted_keywords longtext DEFAULT NULL,
+        keyword_count int(11) DEFAULT 0,
+        processed_data longtext DEFAULT NULL,
+        mapping_status varchar(20) DEFAULT 'unmapped',
+        mapped_to_master_id int(11) DEFAULT NULL,
+        mapped_to_master_sku varchar(100) DEFAULT NULL,
+        mapping_confidence decimal(5,2) DEFAULT 0,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY upload_batch_id (upload_batch_id),
+        KEY mapping_status (mapping_status),
+        KEY mapped_to_master_id (mapped_to_master_id),
+        KEY mapped_to_master_sku (mapped_to_master_sku)
+    ) $charset_collate;";
+	  
+// ENHANCED Mappings table
+    $mappings_table = $wpdb->prefix . 'kt_cigar_product_mappings';
+    
+    $sql2 = "CREATE TABLE $mappings_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        supplier_product_id int(11) NOT NULL,
+        supplier_sku varchar(100) DEFAULT NULL,
+        supplier_title text DEFAULT NULL,
+        master_product_id int(11) NOT NULL,
+        master_product_sku varchar(100) DEFAULT NULL,
+        master_product_title text DEFAULT NULL,
+        mapping_type varchar(20) DEFAULT 'manual',
+        confidence_score decimal(5,2) DEFAULT 0,
+        mapping_details longtext DEFAULT NULL,
+        match_summary text DEFAULT NULL,
+        created_by int(11) DEFAULT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY supplier_product_id (supplier_product_id),
+        KEY master_product_id (master_product_id),
+        KEY mapping_type (mapping_type),
+        KEY supplier_sku (supplier_sku),
+        KEY master_product_sku (master_product_sku)
+    ) $charset_collate;";
+	  
+      
+      require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+      dbDelta($sql1);
+      dbDelta($sql2);
+      
+      // ADD THIS: Update xwz_master_products table with keyword columns
+      $master_table_updates = array(
+          "ALTER TABLE xwz_master_products ADD COLUMN IF NOT EXISTS extracted_keywords LONGTEXT DEFAULT NULL",
+          "ALTER TABLE xwz_master_products ADD COLUMN IF NOT EXISTS keyword_count INT(11) DEFAULT 0", 
+          "ALTER TABLE xwz_master_products ADD COLUMN IF NOT EXISTS processed_data LONGTEXT DEFAULT NULL",
+          "ALTER TABLE xwz_master_products ADD COLUMN IF NOT EXISTS extraction_status VARCHAR(20) DEFAULT 'unprocessed'",
+          "ALTER TABLE xwz_master_products ADD INDEX IF NOT EXISTS idx_extraction_status (extraction_status)",
+          "ALTER TABLE xwz_master_products ADD INDEX IF NOT EXISTS idx_keyword_count (keyword_count)"
+      );
+      
+      foreach ($master_table_updates as $sql) {
+          $wpdb->query($sql);
+      }
+      
+      // Clean up ANY old internal tables
+      $old_tables = array(
+          $wpdb->prefix . 'kt_cigar_internal_products',
+          $wpdb->prefix . 'kt_cigar_processed_keywords'
+      );
+      foreach ($old_tables as $table) {
+          $wpdb->query("DROP TABLE IF EXISTS $table");
+      }
+      // ADD MISSING COLUMNS TO EXISTING TABLES
+    $this->add_missing_columns();
+      update_option('kt_cigar_db_version', KT_CIGAR_DB_VERSION);
+      $this->write_admin_log("Database tables updated - master products now support keyword extraction");
+  }
+
+/**
+ * Add missing columns to existing tables
+ */
+private function add_missing_columns() {
+    global $wpdb;
+    
+    // Add missing columns to supplier table
+    $supplier_columns = array(
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_supplier_products ADD COLUMN IF NOT EXISTS supplier_price_display VARCHAR(20) DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_supplier_products ADD COLUMN IF NOT EXISTS mapped_to_master_sku VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_supplier_products ADD INDEX IF NOT EXISTS idx_mapped_to_master_sku (mapped_to_master_sku)"
+    );
+    
+    // Add missing columns to mapping table
+    $mapping_columns = array(
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD COLUMN IF NOT EXISTS supplier_sku VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD COLUMN IF NOT EXISTS supplier_title TEXT DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD COLUMN IF NOT EXISTS master_product_sku VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD COLUMN IF NOT EXISTS master_product_title TEXT DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD COLUMN IF NOT EXISTS match_summary TEXT DEFAULT NULL",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD INDEX IF NOT EXISTS idx_supplier_sku (supplier_sku)",
+        "ALTER TABLE {$wpdb->prefix}kt_cigar_product_mappings ADD INDEX IF NOT EXISTS idx_master_product_sku (master_product_sku)"
+    );
+    
+    $all_updates = array_merge($supplier_columns, $mapping_columns);
+    
+    foreach ($all_updates as $sql) {
+        $result = $wpdb->query($sql);
+        if ($result === false) {
+            $this->write_admin_log("SQL Error: " . $wpdb->last_error . " | Query: " . $sql);
+        }
+    }
+    
+    $this->write_admin_log("Missing columns added to existing tables");
+}	
+	
+	
+	
+	
+	
+ /**
+ * ENHANCED: Process keywords for a single master product with advanced title parsing
+ */
+/**
+ * ENHANCED: Process keywords for a single master product with comprehensive logging
+ * Replace your existing process_single_master_product method with this complete version
+ */
+/**
+ * FIXED: Process keywords for a single master product with proper encoding
+ */
+private function process_single_master_product($product_id) {
+    global $wpdb;
+    
+    $this->write_admin_log("🔄 START processing master product ID: $product_id");
+    
+    $product = $wpdb->get_row($wpdb->prepare("
+        SELECT id, product_title, brand, seat_row, seat_number, seats_reference 
+        FROM xwz_master_products 
+        WHERE id = %d AND product_type = 'cigar'
+    ", $product_id));
+    
+    if (!$product) {
+        $this->write_admin_log("❌ ERROR: Master product ID $product_id not found");
+        return false;
+    }
+    
+    $this->write_admin_log("📝 Processing: '{$product->product_title}' | Brand: '{$product->brand}'");
+    
+    if (!$this->ensure_kt_mappings_loaded()) {
+        $this->write_admin_log("❌ ERROR: KT_Cigar_Mappings not available");
+        $wpdb->update('xwz_master_products', array('extraction_status' => 'retry'), array('id' => $product_id));
+        return false;
+    }
+    
+    try {
+        // USE ULTRA-INTELLIGENT EXTRACTION SYSTEM
+        $processed = KT_Cigar_Mappings::process_supplier_product(
+            $product->product_title,  // Use original title - ultra-intelligent system handles cleaning
+            $product->brand ?? '', 
+            $product->seats_reference ?? ''
+        );
+        
+        $this->write_admin_log("🧠 Ultra-intelligent extraction: " . count($processed['keywords']) . " keywords");
+        
+        // Only add database dimensions if the intelligent system didn't find them
+        if (!empty($product->seat_row) && !empty($product->seat_number)) {
+            $dimensions = $product->seat_row . '/' . $product->seat_number;
+            
+            if (empty($processed['ring_gauge']) || empty($processed['length'])) {
+                KT_Cigar_Mappings::add_provided_dimensions($processed, $dimensions);
+                $this->write_admin_log("✅ Added database dimensions as fallback");
+            }
+        }
+        
+        $this->write_admin_log("✅ Ultra-intelligent extraction complete: " . count($processed['keywords']) . " keywords");
+        
+        // Validate and clean for database storage
+        $safe_processed_data = $this->sanitize_processed_data($processed);
+        
+        // Prepare update data
+        $update_data = array(
+            'extracted_keywords' => $this->safe_serialize($processed['keywords']),
+            'keyword_count' => count($processed['keywords']),
+            'processed_data' => $this->safe_serialize($safe_processed_data),
+            'extraction_status' => 'processed'
+        );
+        
+        // Check if length_inches column exists and add if available
+        $column_check = $wpdb->get_results("SHOW COLUMNS FROM xwz_master_products LIKE 'length_inches'");
+        if (!empty($column_check) && isset($processed['length']) && $processed['length']) {
+            $update_data['length_inches'] = floatval($processed['length']);
+        }
+        
+        // Update database
+        $this->write_admin_log("💾 Updating database with " . count($processed['keywords']) . " keywords");
+        
+        $result = $wpdb->update('xwz_master_products', $update_data, array('id' => $product_id));
+        
+        if ($result === false) {
+            $this->write_admin_log("❌ Database update failed: " . $wpdb->last_error);
+            throw new Exception("Database update failed: " . $wpdb->last_error);
+        }
+        
+        // Learn from successful extraction
+        if (class_exists('KT_Cigar_Learning_System')) {
+            foreach ($processed['keywords'] as $keyword) {
+                if (strpos($keyword, ':') !== false) {
+                    list($type, $value) = explode(':', $keyword, 2);
+                    KT_Cigar_Learning_System::learn_successful_pattern($product->product_title, strtolower($type), $value, 'master_processing');
+                }
+            }
+        }
+        
+        $this->write_admin_log("✅ SUCCESS: Product ID $product_id processed with " . count($processed['keywords']) . " keywords");
+        return true;
+        
+    } catch (Exception $e) {
+        $this->write_admin_log("❌ FAILED: Product ID $product_id - " . $e->getMessage());
+        
+        $wpdb->update('xwz_master_products', array('extraction_status' => 'error'), array('id' => $product_id));
+        return false;
+    }
+}
+/**
+ * FIXED: Safe serialization with encoding cleanup
+ */
+private function safe_serialize($data) {
+    if (is_array($data)) {
+        $cleaned_data = array();
+        foreach ($data as $key => $value) {
+            $clean_key = $this->clean_for_database($key);
+            $clean_value = is_string($value) ? $this->clean_for_database($value) : $value;
+            $cleaned_data[$clean_key] = $clean_value;
+        }
+        return maybe_serialize($cleaned_data);
+    }
+    
+    return maybe_serialize($this->clean_for_database($data));
+}
+
+/**
+ * FIXED: Clean text for safe database storage
+ */
+private function clean_for_database($text) {
+    if (!is_string($text)) {
+        return $text;
+    }
+    
+    // Convert to proper UTF-8
+    $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+    
+    // Remove control characters and null bytes
+    $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
+    
+    // Remove invalid UTF-8 sequences
+    $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+    
+    // Limit length to prevent database issues
+    return mb_substr($text, 0, 1000, 'UTF-8');
+}
+
+/**
+ * FIXED: Sanitize processed data structure
+ */
+private function sanitize_processed_data($processed) {
+    $safe_data = array();
+    
+    foreach ($processed as $key => $value) {
+        $clean_key = $this->clean_for_database($key);
+        
+        if (is_array($value)) {
+            $clean_array = array();
+            foreach ($value as $item) {
+                $clean_array[] = $this->clean_for_database($item);
+            }
+            $safe_data[$clean_key] = $clean_array;
+        } else {
+            $safe_data[$clean_key] = $this->clean_for_database($value);
+        }
+    }
+    
+    return $safe_data;
+}
+ /**
+ * Process multiple master products in batches
+ */
+private function process_existing_master_products_batch($limit = 500) {
+    global $wpdb;
+    
+    $this->write_admin_log("=== STARTING BATCH PROCESSING (Limit: $limit) ===");
+    
+    // Step 1: Reset any stuck 'processing' records
+    $reset_result = $wpdb->query("
+        UPDATE xwz_master_products 
+        SET extraction_status = 'unprocessed' 
+        WHERE product_type = 'cigar'
+        AND extraction_status = 'processing'
+    ");
+    
+    if ($reset_result > 0) {
+        $this->write_admin_log("Reset $reset_result stuck 'processing' records");
+    }
+    
+    // Step 2: Get products that need processing (NO atomic locking)
+    $products_to_process = $wpdb->get_results($wpdb->prepare("
+        SELECT id, product_title, brand, extraction_status 
+        FROM xwz_master_products 
+        WHERE product_type = 'cigar'
+        AND id > 0
+        AND (
+    extraction_status IS NULL 
+    OR extraction_status = '' 
+    OR extraction_status = 'unprocessed'
+    OR extraction_status = 'retry'
+    OR extraction_status = 'error'
+)
+        ORDER BY 
+            CASE 
+                WHEN extraction_status = 'retry' THEN 1
+                WHEN extraction_status IS NULL OR extraction_status = '' THEN 2
+                WHEN extraction_status = 'unprocessed' THEN 3
+                ELSE 4
+            END,
+            id ASC
+        LIMIT %d
+    ", $limit));
+    
+    if (empty($products_to_process)) {
+        $this->write_admin_log("No products found that need processing");
+        return 0;
+    }
+    
+    $this->write_admin_log("Found " . count($products_to_process) . " products that need processing");
+    
+    // Step 3: Process each product individually
+    $processed = 0;
+    $failed = 0;
+    
+    foreach ($products_to_process as $product) {
+        try {
+            set_time_limit(30);
+            
+            // Mark as processing
+            $wpdb->update(
+                'xwz_master_products',
+                array('extraction_status' => 'processing'),
+                array('id' => $product->id)
+            );
+            
+            // Actually process
+            if ($this->process_single_master_product($product->id)) {
+                $processed++;
+                $this->write_admin_log("✅ Success: Product {$product->id}");
+            } else {
+                $failed++;
+                $this->write_admin_log("❌ Failed: Product {$product->id}");
+                
+                // Mark as retry
+                $wpdb->update(
+                    'xwz_master_products',
+                    array('extraction_status' => 'retry'),
+                    array('id' => $product->id)
+                );
+            }
+            
+        } catch (Exception $e) {
+            $failed++;
+            $this->write_admin_log("💥 Exception: Product {$product->id} - " . $e->getMessage());
+            
+            // Mark as retry
+            $wpdb->update(
+                'xwz_master_products',
+                array('extraction_status' => 'retry'),
+                array('id' => $product->id)
+            );
+        }
+        
+        // Progress logging
+        if (($processed + $failed) % 25 === 0) {
+            $this->write_admin_log("Progress: $processed processed, $failed failed");
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+        }
+    }
+    
+    // Final cleanup
+    $wpdb->query("
+        UPDATE xwz_master_products 
+        SET extraction_status = 'retry' 
+        WHERE product_type = 'cigar' 
+        AND extraction_status = 'processing'
+    ");
+    
+    $this->write_admin_log("=== BATCH COMPLETE: $processed processed, $failed failed ===");
+    return $processed;
+}
+/**
+ * Get processing statistics - FIXED VERSION
+ */
+private function get_master_processing_stats() {
+    global $wpdb;
+    
+    $stats = $wpdb->get_row("
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN extraction_status = 'processed' AND keyword_count > 0 THEN 1 ELSE 0 END) as processed,
+            SUM(CASE WHEN extraction_status = 'error' THEN 1 ELSE 0 END) as errors,
+            SUM(CASE WHEN extraction_status = 'processing' THEN 1 ELSE 0 END) as processing,
+            SUM(CASE WHEN extraction_status = 'retry' THEN 1 ELSE 0 END) as retry,
+            SUM(CASE WHEN (
+                    extraction_status IS NULL 
+                    OR extraction_status = '' 
+                    OR extraction_status = 'unprocessed' 
+                    OR extraction_status = 'retry'
+                    OR extraction_status = 'error'
+                    OR (extraction_status = 'processed' AND (keyword_count = 0 OR keyword_count IS NULL))
+                ) THEN 1 ELSE 0 END) as unprocessed
+        FROM xwz_master_products 
+        WHERE product_type = 'cigar'
+    ", ARRAY_A);
+    
+    return $stats;
+}
+  private function ensure_kt_mappings_loaded() {
+      if (!class_exists('KT_Cigar_Mappings')) {
+          $this->write_admin_log("KT_Cigar_Mappings class not found", 'ERROR');
+          return false;
+      }
+      return true;
+  }
+  
+  public function add_admin_menu() {
+      add_menu_page(
+          'KT Cigar Matcher',
+          'Cigar Matcher',
+          'manage_options',
+          'kt-cigar-matcher',
+          array($this, 'render_admin_page'),
+          'dashicons-search',
+          3000002
+      );
+  }
+  
+  public function render_admin_page() {
+      ?>
+      <div class="wrap kt-cigar-matcher">
+          <h1>KT Cigar Matcher</h1>
+          
+         <div class="nav-tab-wrapper">
+    <a href="#dashboard" class="nav-tab nav-tab-active" data-tab="dashboard">Dashboard</a>
+    <a href="#upload" class="nav-tab" data-tab="upload">Upload Supplier CSV</a>
+    <a href="#supplier" class="nav-tab" data-tab="supplier">Supplier Products</a>
+    <a href="#products" class="nav-tab" data-tab="products">Master Products</a>
+    <a href="#mapping" class="nav-tab" data-tab="mapping">Product Mapping</a>
+</div>
+          
+          <!-- Dashboard Tab -->
+          <div id="dashboard-tab" class="tab-content active">
+              <?php $this->render_dashboard(); ?>
+          </div>
+          
+          <!-- Upload Tab -->
+          <div id="upload-tab" class="tab-content">
+              <?php $this->render_upload_section(); ?>
+          </div>
+		  
+		  <!-- Supplier Tab -->
+<div id="supplier-tab" class="tab-content">
+    <?php $this->render_supplier_section(); ?>
+</div>
+          
+          <!-- Master Products Tab -->
+          <div id="products-tab" class="tab-content">
+              <?php $this->render_products_section(); ?>
+          </div>
+          
+          <!-- Mapping Tab -->
+          <div id="mapping-tab" class="tab-content">
+              <?php $this->render_mapping_section(); ?>
+          </div>
+      </div>
+      
+      <?php $this->render_modals(); ?>
+
+ <!-- ADD THE SCRIPT HERE -->
+    <script>
+   window.enableInlineEdit = function(productId, field) {
+    const span = document.querySelector(`#master-${field}-${productId} span`);
+    const currentValue = span.textContent.trim();
+    
+    // Create input field
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = currentValue;
+    input.style.width = '100%';
+    input.style.fontSize = '12px';
+    
+    // Replace span with input
+    span.parentNode.replaceChild(input, span);
+    input.focus();
+    input.select();
+    
+    // Save on Enter or blur
+    function saveEdit() {
+        const newValue = input.value.trim();
+        
+        jQuery.post(ktCigarAjax.ajax_url, {
+            action: 'kt_inline_edit_master',
+            nonce: ktCigarAjax.nonce,
+            product_id: productId,
+            field: field,
+            value: newValue
+        }, function(response) {
+            if (response.success) {
+                const newSpan = document.createElement('span');
+                newSpan.onclick = function() { enableInlineEdit(productId, field); };
+                newSpan.style.cursor = 'pointer';
+                newSpan.style.borderBottom = '1px dotted #999';
+                newSpan.textContent = newValue;
+                
+                input.parentNode.replaceChild(newSpan, input);
+            } else {
+                alert('Failed to update: ' + (response.data || 'Unknown error'));
+            }
+        });
+    }
+    
+    input.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            saveEdit();
+        }
+    });
+    
+    input.addEventListener('blur', saveEdit);
+};
+	function enableInlineEditDropdown(productId, field, options) {
+    const span = document.querySelector(`#master-${field}-${productId} span`);
+    const currentValue = span.getAttribute('data-value') || (span.textContent.trim() === 'Yes' ? '1' : '0');
+    
+    const select = document.createElement('select');
+    select.style.width = '100%';
+    
+    for (const [value, text] of Object.entries(options)) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = text;
+        if (value === currentValue) option.selected = true;
+        select.appendChild(option);
+    }
+    
+    span.parentNode.replaceChild(select, span);
+    select.focus();
+    
+    function saveEdit() {
+        const newValue = select.value;
+        const newText = options[newValue];
+        
+        jQuery.post(ktCigarAjax.ajax_url, {
+            action: 'kt_inline_edit_master',
+            nonce: ktCigarAjax.nonce,
+            product_id: productId,
+            field: field,
+            value: newValue
+        }, function(response) {
+            if (response.success) {
+                const newSpan = document.createElement('span');
+                newSpan.onclick = function() { enableInlineEditDropdown(productId, field, options); };
+                newSpan.style.cursor = 'pointer';
+                newSpan.style.borderBottom = '1px dotted #999';
+                newSpan.setAttribute('data-value', newValue);
+                newSpan.innerHTML = '<small>' + newText + '</small>';
+                
+                select.parentNode.replaceChild(newSpan, select);
+            } else {
+                alert('Failed to update: ' + (response.data || 'Unknown error'));
+            }
+        });
+    }
+    
+    select.addEventListener('change', saveEdit);
+    select.addEventListener('blur', saveEdit);
+}
+
+function enableInlineEditTextarea(productId, field) {
+    const span = document.querySelector(`#master-${field}-${productId} span`);
+    const currentValue = span.textContent.trim();
+    
+    const textarea = document.createElement('textarea');
+    textarea.value = currentValue;
+    textarea.style.width = '100%';
+    textarea.style.height = '80px';
+    textarea.style.fontSize = '11px';
+    
+    span.parentNode.replaceChild(textarea, span);
+    textarea.focus();
+    
+    function saveEdit() {
+        const newValue = textarea.value.trim();
+        
+        jQuery.post(ktCigarAjax.ajax_url, {
+            action: 'kt_inline_edit_master',
+            nonce: ktCigarAjax.nonce,
+            product_id: productId,
+            field: field,
+            value: newValue
+        }, function(response) {
+            if (response.success) {
+                const newSpan = document.createElement('span');
+                newSpan.onclick = function() { enableInlineEditTextarea(productId, field); };
+                newSpan.style.cursor = 'pointer';
+                newSpan.style.borderBottom = '1px dotted #999';
+                newSpan.innerHTML = '<div style="font-size: 11px; max-height: 60px; overflow: hidden;">' + 
+                    newValue.substring(0, 100) + (newValue.length > 100 ? '...' : '') + '</div>';
+                
+                textarea.parentNode.replaceChild(newSpan, textarea);
+            } else {
+                alert('Failed to update: ' + (response.data || 'Unknown error'));
+            }
+        });
+    }
+    
+    textarea.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter' && e.ctrlKey) {
+            saveEdit();
+        }
+    });
+    
+    textarea.addEventListener('blur', saveEdit);
+}	
+		
+function closeProductModal() {
+    document.getElementById('product-modal').style.display = 'none';
+}
+
+function updateImagePreview() {
+    const url = document.getElementById('main-photo-url').value;
+    const img = document.getElementById('main-photo-thumb');
+    const placeholder = document.getElementById('main-photo-placeholder');
+    
+    if (url) {
+        img.src = url;
+        img.style.display = 'block';
+        placeholder.style.display = 'none';
+        img.onerror = function() {
+            img.style.display = 'none';
+            placeholder.style.display = 'flex';
+            placeholder.textContent = 'Failed to load image';
+        };
+    } else {
+        img.style.display = 'none';
+        placeholder.style.display = 'flex';
+        placeholder.textContent = 'No image selected';
+    }
+}
+
+function clearMainPhoto() {
+    document.getElementById('main-photo-url').value = '';
+    updateImagePreview();
+}
+
+function editMasterProduct(productId) {
+    jQuery.post(ktCigarAjax.ajax_url, {
+        action: 'kt_get_master_product',
+        nonce: ktCigarAjax.nonce,
+        product_id: productId
+    }, function(response) {
+        if (response.success) {
+            const product = response.data;
+            
+            document.getElementById('product-id').value = product.id;
+            document.getElementById('product-room-id').value = product.room_id || '';
+            document.getElementById('product-sku').value = product.sku || '';
+            document.getElementById('product-title').value = product.product_title || '';
+            document.getElementById('product-category').value = product.product_category || '';
+            document.getElementById('product-brand').value = product.brand || '';
+            document.getElementById('product-price').value = product.recommended_retail_price || '';
+            document.getElementById('product-seat-row').value = product.seat_row || '';
+            document.getElementById('product-seat-number').value = product.seat_number || '';
+            document.getElementById('seats-reference').value = product.seats_reference || '';
+            document.getElementById('product-featured').value = product.is_featured || '0';
+            // Load main photo
+const mainPhotoUrl = product.main_photo || '';
+document.getElementById('main-photo-url').value = mainPhotoUrl;
+updateImagePreview();
+            document.getElementById('product-modal').style.display = 'block';
+            document.getElementById('modal-title').textContent = 'Edit Master Product';
+        }
+    });
+}
+
+function openProductModal() {
+    document.getElementById('product-form').reset();
+    document.getElementById('product-id').value = '';
+    document.getElementById('modal-title').textContent = 'Add New Master Product';
+    document.getElementById('product-modal').style.display = 'block';
+}	
+function updateImagePreview() {
+    const url = document.getElementById('main-photo-url').value;
+    const img = document.getElementById('main-photo-thumb');
+    const placeholder = document.getElementById('main-photo-placeholder');
+    
+    if (url) {
+        img.src = url;
+        img.style.display = 'block';
+        placeholder.style.display = 'none';
+    } else {
+        img.style.display = 'none';
+        placeholder.style.display = 'flex';
+    }
+}
+
+function clearMainPhoto() {
+    document.getElementById('main-photo-url').value = '';
+    updateImagePreview();
+}
+// Handle form submission
+jQuery('#product-form').on('submit', function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    formData.append('action', 'kt_save_master_product');
+    formData.append('nonce', ktCigarAjax.nonce);
+    
+    jQuery.post(ktCigarAjax.ajax_url, jQuery('#product-form').serialize() + '&action=kt_save_master_product&nonce=' + ktCigarAjax.nonce, function(response) {
+        if (response.success) {
+            alert('Product saved successfully!');
+            closeProductModal();
+            location.reload(); // Refresh the page to see changes
+        } else {
+            alert('Error: ' + (response.data || 'Unknown error'));
+        }
+    });
+});		
+		
+    </script>
+
+
+
+
+      <?php
+  }
+  
+  private function render_dashboard() {
+      global $wpdb;
+      
+      // Get stats from supplier table and xwz_master_products
+      $total_supplier = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_supplier_products");
+      $total_master = $wpdb->get_var("SELECT COUNT(*) FROM xwz_master_products WHERE product_type = 'cigar'");
+      $total_mappings = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_product_mappings");
+      $unmapped_supplier = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_supplier_products WHERE mapping_status = 'unmapped'");
+      
+      ?>
+      <div class="kt-dashboard">
+          <div class="kt-stats-grid">
+              <div class="kt-stat-card">
+                  <h3>Supplier Products</h3>
+                  <div class="kt-stat-number"><?php echo number_format($total_supplier); ?></div>
+              </div>
+              <div class="kt-stat-card">
+                  <h3>Master Products</h3>
+                  <div class="kt-stat-number"><?php echo number_format($total_master); ?></div>
+              </div>
+              <div class="kt-stat-card">
+                  <h3>Total Mappings</h3>
+                  <div class="kt-stat-number"><?php echo number_format($total_mappings); ?></div>
+              </div>
+              <div class="kt-stat-card">
+                  <h3>Unmapped Supplier</h3>
+                  <div class="kt-stat-number"><?php echo number_format($unmapped_supplier); ?></div>
+              </div>
+          </div>
+          
+          <div class="kt-recent-activity">
+              <h3>Recent Upload Batches</h3>
+              <?php $this->render_recent_batches(); ?>
+          </div>
+      </div>
+      <?php
+  }
+  
+  private function render_recent_batches() {
+      global $wpdb;
+      
+      $batches = $wpdb->get_results("
+          SELECT upload_batch_id, 
+                 COUNT(*) as total_products,
+                 SUM(CASE WHEN mapping_status IN ('mapped', 'auto-matched') THEN 1 ELSE 0 END) as mapped_products,
+                 MIN(created_at) as uploaded_at
+          FROM {$wpdb->prefix}kt_cigar_supplier_products 
+          GROUP BY upload_batch_id 
+          ORDER BY uploaded_at DESC 
+          LIMIT 10
+      ");
+      
+      if ($batches) {
+          ?>
+          <table class="widefat">
+              <thead>
+                  <tr>
+                      <th>Batch ID</th>
+                      <th>Upload Date</th>
+                      <th>Total Products</th>
+                      <th>Mapped</th>
+                      <th>Progress</th>
+                      <th>Actions</th>
+                  </tr>
+              </thead>
+              <tbody>
+                  <?php foreach ($batches as $batch): ?>
+                  <tr>
+                      <td><?php echo esc_html($batch->upload_batch_id); ?></td>
+                      <td><?php echo date('Y-m-d H:i', strtotime($batch->uploaded_at)); ?></td>
+                      <td><?php echo $batch->total_products; ?></td>
+                      <td><?php echo $batch->mapped_products; ?></td>
+                      <td>
+                          <?php 
+                          $percentage = $batch->total_products > 0 ? round(($batch->mapped_products / $batch->total_products) * 100) : 0;
+                          echo $percentage . '%';
+                         ?>
+                     </td>
+                     <td>
+                         <button type="button" class="button" onclick="viewBatch('<?php echo esc_js($batch->upload_batch_id); ?>')">View</button>
+                         <button type="button" class="button button-link-delete" onclick="deleteBatch('<?php echo esc_js($batch->upload_batch_id); ?>')">Delete</button>
+                     </td>
+                 </tr>
+                 <?php endforeach; ?>
+             </tbody>
+         </table>
+         <?php
+     } else {
+         echo '<p>No upload batches found.</p>';
+     }
+ }
+ 
+ private function render_upload_section() {
+     ?>
+     <div class="kt-upload-section">
+         <h2>Upload Supplier CSV</h2>
+         <p class="description">Upload CSV files containing supplier product data to map to your master products.</p>
+         
+         <form id="csv-upload-form" enctype="multipart/form-data">
+             <table class="form-table">
+                 <tr>
+                     <th><label for="csv-file">CSV File</label></th>
+                     <td><input type="file" id="csv-file" name="csv_file" accept=".csv" required></td>
+                 </tr>
+                 <tr>
+                     <th><label for="batch-name">Batch Name</label></th>
+                     <td>
+                         <input type="text" id="batch-name" name="batch_name" class="regular-text" 
+                                placeholder="e.g., supplier_2024_01">
+                         <p class="description">Optional: Give this upload batch a name</p>
+                     </td>
+                 </tr>
+                 <tr>
+                     <th><label for="delimiter">CSV Delimiter</label></th>
+                     <td>
+                         <select id="delimiter" name="delimiter">
+                             <option value=",">,</option>
+                             <option value=";">;)</option>
+                             <option value="\t">Tab</option>
+                         </select>
+                     </td>
+                 </tr>
+             </table>
+             
+             <p class="submit">
+                 <input type="submit" class="button-primary" value="Upload CSV">
+             </p>
+         </form>
+         
+         <div id="upload-progress" style="display:none;">
+             <p>Uploading and processing CSV file...</p>
+             <div class="progress-bar">
+                 <div class="progress-fill"></div>
+             </div>
+         </div>
+         
+         <div id="upload-results" style="display:none;">
+             <div id="upload-summary"></div>
+         </div>
+     </div>
+     <?php
+ }
+ 
+ private function render_products_section() {
+     $stats = $this->get_master_processing_stats();
+     
+     // Get pagination parameters
+     $page = isset($_GET['master_page']) ? max(1, intval($_GET['master_page'])) : 1;
+     $per_page = isset($_GET['master_per_page']) ? intval($_GET['master_per_page']) : 50;
+     $search = isset($_GET['master_search']) ? sanitize_text_field($_GET['master_search']) : '';
+     
+     ?>
+     <div class="kt-products-section">
+         <div class="kt-products-header">
+             <h2>Master Products (xwz_master_products)</h2>
+             <p class="description">Manage your master product database directly.</p>
+             
+             <!-- Processing Status -->
+             <div class="kt-processing-status" style="margin: 15px 0; padding: 10px; background: #f8f9fa; border-left: 4px solid #0073aa;">
+                 <strong>Keyword Processing Status:</strong>
+                 <span id="processing-stats">
+                     Total: <?php echo number_format($stats['total']); ?> | 
+                     Processed: <?php echo number_format($stats['processed']); ?> | 
+                     Unprocessed: <?php echo number_format($stats['unprocessed']); ?> | 
+                     Errors: <?php echo number_format($stats['errors']); ?>
+                 </span>
+             </div>
+             
+             <!-- DEBUG PANEL - Remove in production -->
+             <?php if (defined('KT_DEBUG') && KT_DEBUG): ?>
+             <div class="kt-debug-section">
+                 <h4>🔧 Debug & Testing Tools</h4>
+                 <p style="margin: 5px 0; font-size: 12px; color: #666;">These tools help diagnose auto-matching issues.</p>
+                 
+                 <button type="button" class="button kt-test-button" onclick="testAutoMatching()">
+                     Test Auto-Matching System
+                 </button>
+                 
+                 <button type="button" class="button kt-test-button" onclick="runDiagnostics()">
+                     Run Full Diagnostics
+                 </button>
+                 
+                 <button type="button" class="button kt-test-button" onclick="checkDataFile()">
+                     Check Data File Status
+                 </button>
+                 
+                 <button type="button" class="button kt-test-button" onclick="testProductExtraction()">
+                     Test Product Extraction
+                 </button>
+                 
+                <button type="button" class="button kt-test-button" onclick="updatePriceDisplays()">
+    🔧 Fix Price Displays
+</button>
+                 
+                 <!-- Debug Results Container -->
+                 <div id="debug-results" style="margin-top: 10px; display: none; padding: 10px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9;"></div>
+             </div>
+             <?php endif; ?>
+             
+             <div class="kt-products-actions">
+                 <input type="text" id="product-search" placeholder="Search master products..." class="regular-text" value="<?php echo esc_attr($search); ?>">
+                 <button type="button" class="button" onclick="searchMasterProducts()">Search</button>
+                 <button type="button" class="button-primary" onclick="openProductModal()">Add New Product</button>
+                 
+                 <?php if (intval($stats['unprocessed']) > 0): ?>
+                 <button type="button" class="button button-secondary" onclick="processAllMasterProducts()" id="process-all-btn">
+                     Process Keywords (<?php echo number_format($stats['unprocessed']); ?> pending - <?php echo ceil($stats['unprocessed'] / 100); ?> batches)
+                 </button>
+                 <?php endif; ?>
+                 <button type="button" class="button" onclick="refreshProcessingStats()">Refresh Stats</button>
+                 <button type="button" class="button button-secondary" onclick="clearAndReprocessAll()" style="margin-left: 10px;">
+                     Clear & Reprocess All Keywords
+                 </button>
+             </div>
+         </div>
+         
+         <!-- Processing Progress -->
+         <div id="processing-progress" style="display:none; margin: 20px 0;">
+             <p>Processing master product keywords...</p>
+             <div class="progress-bar">
+                 <div class="progress-fill"></div>
+             </div>
+             <div id="processing-status"></div>
+         </div>
+         
+         <div id="products-list">
+             <?php $this->render_master_products_table($search, $page, $per_page); ?>
+         </div>
+     </div>
+     <?php
+ }
+ 
+ private function render_master_products_table($search = '', $page = 1, $per_page = 50) {
+     global $wpdb;
+     
+     $where = "WHERE product_type = 'cigar'";
+     $params = array();
+     
+     if (!empty($search)) {
+         $search_param = '%' . $wpdb->esc_like($search) . '%';
+         $where .= " AND (product_title LIKE %s OR sku LIKE %s OR brand LIKE %s OR seats_reference LIKE %s)";
+         $params = array($search_param, $search_param, $search_param, $search_param);
+     }
+     
+     // Get total count for pagination
+     $count_query = "SELECT COUNT(*) FROM xwz_master_products $where";
+     if (!empty($params)) {
+         $total_items = $wpdb->get_var($wpdb->prepare($count_query, $params));
+     } else {
+         $total_items = $wpdb->get_var($count_query);
+     }
+     
+     $total_pages = ceil($total_items / $per_page);
+     $offset = ($page - 1) * $per_page;
+     
+     // Get products with pagination
+     $query = "
+         SELECT m.*, 
+                COUNT(map.id) as mapping_count
+         FROM xwz_master_products m
+         LEFT JOIN {$wpdb->prefix}kt_cigar_product_mappings map ON m.id = map.master_product_id
+         $where 
+         GROUP BY m.id
+         ORDER BY m.id DESC 
+         LIMIT %d OFFSET %d
+     ";
+     
+     if (!empty($params)) {
+         $products = $wpdb->get_results($wpdb->prepare($query, array_merge($params, array($per_page, $offset))));
+     } else {
+         $products = $wpdb->get_results($wpdb->prepare($query, $per_page, $offset));
+     }
+     
+     // Pagination controls
+     $this->render_pagination_controls($page, $total_pages, $per_page, $total_items, 'master');
+     
+     if ($products) {
+         ?>
+       <table class="widefat striped kt-compact-table">
+    <thead>
+        <tr>
+            <th style="width: 60px;">Image</th>
+            <th style="width: 50px;">ID</th>
+            <th style="width: 80px;">SKU</th>
+            <th style="width: 200px;">Product Title</th>
+            <th style="width: 100px;">Brand</th>
+            <th style="width: 100px;">Category</th>
+            <th style="width: 80px;">Ring x Length</th>
+            <th style="width: 60px;">Price</th>
+            <th style="width: 60px;">Room ID</th>
+            <th style="width: 60px;">Featured</th>
+            <th style="width: 200px;">Description</th>
+            <th style="width: 150px;">Keywords</th>
+            <th style="width: 60px;">Mappings</th>
+            <th style="width: 150px;">Actions</th>
+        </tr>
+    </thead>
+             <tbody>
+                 <?php foreach ($products as $product): ?>
+                 <tr>
+                     <td>
+                         <?php if (!empty($product->main_photo)): ?>
+                         <img src="<?php echo esc_url($product->main_photo); ?>" 
+                              alt="<?php echo esc_attr($product->product_title); ?>" 
+                              style="width:40px;height:40px;object-fit:cover;">
+                         <?php else: ?>
+                         <div style="width:40px;height:40px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;font-size:8px;">No Image</div>
+                         <?php endif; ?>
+                     </td>
+                    
+					<td><?php echo $product->id; ?></td>
+
+					 
+					 
+					 
+					 
+					 
+					 
+					 
+                    <td id="master-sku-<?php echo $product->id; ?>"><span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'sku')" style="cursor:pointer;border-bottom:1px dotted #999;"><small><?php echo esc_html($product->sku); ?></small></span></td>
+                     <td id="master-product_title-<?php echo $product->id; ?>">
+                         <span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'product_title')" style="cursor:pointer;border-bottom:1px dotted #999;" title="Click to edit">
+                             <div style="font-size: 12px; line-height: 1.3;">
+                                 <?php echo esc_html(substr($product->product_title, 0, 300)) . (strlen($product->product_title) > 50 ? '...' : ''); ?>
+                             </div>
+                         </span>
+                     </td>
+                     <td id="master-brand-<?php echo $product->id; ?>"><span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'brand')" style="cursor:pointer;border-bottom:1px dotted #999;"><small><?php echo esc_html($product->brand); ?></small></span></td>
+					<!-- Category (editable) -->
+<td id="master-product_category-<?php echo $product->id; ?>">
+    <span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'product_category')" 
+          style="cursor:pointer;border-bottom:1px dotted #999;" 
+          title="Click to edit category">
+        <small><?php echo esc_html($product->product_category ?: 'N/A'); ?></small>
+    </span>
+</td> 
+              <td>
+    <span id="master-seat_row-<?php echo $product->id; ?>" onclick="enableInlineEdit(<?php echo $product->id; ?>, 'seat_row')" style="cursor:pointer;border-bottom:1px dotted #999;"><?php echo $product->seat_row ?: 'N/A'; ?></span>
+    x 
+    <span id="master-seat_number-<?php echo $product->id; ?>" onclick="enableInlineEdit(<?php echo $product->id; ?>, 'seat_number')" style="cursor:pointer;border-bottom:1px dotted #999;"><?php echo $product->seat_number ?: 'N/A'; ?></span>
+    <?php 
+    $ring = $product->seat_row ?: 'N/A';
+    $length = $product->seat_number ?: 'N/A';
+    
+    // Try to get from keywords if not in direct fields
+    if (($ring === 'N/A' || $length === 'N/A') && !empty($product->extracted_keywords)) {
+        $keywords = maybe_unserialize($product->extracted_keywords);
+        if (is_array($keywords)) {
+            foreach ($keywords as $keyword) {
+                if (strpos($keyword, 'RING:') === 0 && $ring === 'N/A') {
+                    $ring = str_replace('RING:', '', $keyword);
+                }
+                if (strpos($keyword, 'LENGTH:') === 0 && $length === 'N/A') {
+                    $length_val = str_replace('LENGTH:', '', $keyword);
+                    $length_val = str_replace('mm', '', $length_val);
+                    // Convert mm to inches for display
+                    if (is_numeric($length_val) && $length_val > 50) {
+                        $length = round($length_val / 25.4, 1) . '"';
+                    } else {
+                        $length = $length_val;
+                    }
+                }
+            }
+        }
+    }
+    ?>
+    <small><?php echo esc_html($ring . ' x ' . $length); ?></small>
+</td>
+					 
+                   <td id="master-recommended_retail_price-<?php echo $product->id; ?>"><span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'recommended_retail_price')" style="cursor:pointer;border-bottom:1px dotted #999;"><small><?php echo $product->recommended_retail_price ? '$' . number_format($product->recommended_retail_price, 0) : 'N/A'; ?></small></span></td>
+                   
+					 <!-- Room ID (editable) -->
+<td id="master-room_id-<?php echo $product->id; ?>">
+    <span onclick="enableInlineEdit(<?php echo $product->id; ?>, 'room_id')" 
+          style="cursor:pointer;border-bottom:1px dotted #999;" 
+          title="Click to edit room ID">
+        <small><?php echo esc_html($product->room_id ?: 'N/A'); ?></small>
+    </span>
+</td>
+
+<!-- Featured (editable dropdown) -->
+<td id="master-is_featured-<?php echo $product->id; ?>">
+    <span onclick="enableInlineEditDropdown(<?php echo $product->id; ?>, 'is_featured', {'0':'No', '1':'Yes'})" 
+          style="cursor:pointer;border-bottom:1px dotted #999;" 
+          title="Click to edit featured status">
+        <small><?php echo $product->is_featured ? 'Yes' : 'No'; ?></small>
+    </span>
+</td>
+					 
+					 
+					 <td id="master-seats_reference-<?php echo $product->id; ?>">
+    <span onclick="enableInlineEditTextarea(<?php echo $product->id; ?>, 'seats_reference')" 
+          style="cursor:pointer;border-bottom:1px dotted #999;" 
+          title="Click to edit description">
+        <div style="font-size: 11px; max-height: 60px; overflow: hidden;">
+            <?php echo esc_html(substr($product->seats_reference ?? '', 0, 100)) . (strlen($product->seats_reference ?? '') > 100 ? '...' : ''); ?>
+        </div>
+    </span>
+</td>
+                     <!-- ENHANCED Keywords Display - Show ALL keyword types -->
+                     <td>
+                         <?php 
+                         $status = $product->extraction_status ?? 'unprocessed';
+                         $keyword_count = intval($product->keyword_count ?? 0);
+                         
+                         if ($status === 'processed' && $keyword_count > 0) {
+                             echo '<div>';
+                             echo '<span style="color: #46b450;">✓ ' . $keyword_count . ' keywords</span>';
+                             echo '<button type="button" class="button-small" onclick="toggleKeywords(' . $product->id . ')" style="margin-left: 5px;">View</button>';
+                             echo '</div>';
+                             
+                             // Show expandable keywords - ENHANCED to show ALL types
+                             $keywords = maybe_unserialize($product->extracted_keywords);
+                             if (is_array($keywords) && !empty($keywords)) {
+                                 echo '<div id="keywords-' . $product->id . '" style="display: none; margin-top: 5px; max-height: 100px; overflow-y: auto; font-size: 10px; border: 1px solid #ddd; padding: 5px; background: #f9f9f9;">';
+                                 
+                                 // Group keywords by type for better display
+                                 $grouped_keywords = array();
+                                 foreach ($keywords as $keyword) {
+                                     if (strpos($keyword, ':') !== false) {
+                                         list($type, $value) = explode(':', $keyword, 2);
+                                         $grouped_keywords[$type][] = $value;
+                                     } else {
+                                         $grouped_keywords['OTHER'][] = $keyword;
+                                     }
+                                 }
+                                 
+                                 // ENHANCED: Show ALL keyword types with color coding
+                                 foreach ($grouped_keywords as $type => $values) {
+                                     // Color coding for different types
+                                     $color = '#666'; // default gray
+                                     $bg_color = '#e2e3e5'; // default light gray
+                                     
+                                     switch($type) {
+                                         case 'BRAND':
+                                             $color = '#d63384'; $bg_color = '#f8d7da'; break;
+                                         case 'VITOLA':
+                                             $color = '#198754'; $bg_color = '#d1e7dd'; break;
+                                         case 'RING':
+                                         case 'LENGTH':
+                                             $color = '#0dcaf0'; $bg_color = '#cff4fc'; break;
+                                         case 'MODEL':
+                                         case 'SERIES':
+                                             $color = '#6f42c1'; $bg_color = '#e2d9f3'; break;
+                                         case 'YEAR':
+                                             $color = '#fd7e14'; $bg_color = '#fed7aa'; break;
+                                         case 'COUNT':
+                                         case 'PACK':
+                                             $color = '#20c997'; $bg_color = '#c3f7df'; break;
+                                     }
+                                     
+                                    echo '<div><strong style="color: ' . $color . ';">' . ucfirst(strtolower($type)) . ':</strong> ';
+                                     foreach ($values as $value) {
+                                         echo '<span style="background: ' . $bg_color . '; padding: 1px 4px; margin: 1px; border-radius: 2px; display: inline-block;">' . esc_html($value) . '</span> ';
+                                     }
+                                     echo '</div>';
+                                 }
+                                 echo '</div>';
+                             }
+                         } elseif ($status === 'error') {
+                             echo '<span style="color: #dc3232;">✗ Error</span>';
+                         } else {
+                             echo '<span style="color: #666;">⚬ Pending</span>';
+                         }
+                         ?>
+                     </td>
+                     <td><small><?php echo $product->mapping_count; ?> mappings</small></td>
+                     <td>
+                         <button type="button" class="button-small" onclick="editMasterProduct(<?php echo $product->id; ?>)">Edit</button>
+                         <?php if ($status !== 'processed' || $keyword_count === 0): ?>
+                         <button type="button" class="button-small button-secondary" onclick="processSingleMaster(<?php echo $product->id; ?>)">Process</button>
+                         <?php endif; ?>
+                         <button type="button" class="button-small button-link-delete" onclick="deleteMasterProduct(<?php echo $product->id; ?>)">Delete</button>
+                     </td>
+                 </tr>
+                 <?php endforeach; ?>
+             </tbody>
+         </table>
+         <?php
+         // Bottom pagination
+         $this->render_pagination_controls($page, $total_pages, $per_page, $total_items, 'master');
+     } else {
+         echo '<p>No master products found.</p>';
+     }
+ }
+
+ private function render_pagination_controls($current_page, $total_pages, $per_page, $total_items, $type = 'master') {
+     if ($total_pages <= 1) return;
+         ?>
+         <div class="kt-pagination-controls" style="margin: 15px 0; display: flex; justify-content: space-between; align-items: center;">
+             <div class="kt-pagination-info">
+                <span>Showing <?php echo (($current_page - 1) * $per_page) + 1; ?> to <?php echo min($current_page * $per_page, $total_items); ?> of <?php echo number_format($total_items); ?> items</span>
+            </div>
+            
+            <div class="kt-pagination-size">
+                <label for="<?php echo $type; ?>-per-page">Show:</label>
+                <select id="<?php echo $type; ?>-per-page" onchange="change<?php echo ucfirst($type); ?>PerPage(this.value)">
+                    <option value="50" <?php selected($per_page, 50); ?>>50</option>
+                    <option value="100" <?php selected($per_page, 100); ?>>100</option>
+                    <option value="200" <?php selected($per_page, 200); ?>>200</option>
+                    <option value="500" <?php selected($per_page, 500); ?>>500</option>
+                </select>
+            </div>
+            
+            <div class="kt-pagination-links">
+                <?php if ($current_page > 1): ?>
+                <button type="button" class="button" onclick="goTo<?php echo ucfirst($type); ?>Page(1)">« First</button>
+                <button type="button" class="button" onclick="goTo<?php echo ucfirst($type); ?>Page(<?php echo $current_page - 1; ?>)">‹ Prev</button>
+                <?php endif; ?>
+                
+                <span style="margin: 0 10px;">Page <?php echo $current_page; ?> of <?php echo $total_pages; ?></span>
+                
+                <?php if ($current_page < $total_pages): ?>
+                <button type="button" class="button" onclick="goTo<?php echo ucfirst($type); ?>Page(<?php echo $current_page + 1; ?>)">Next ›</button>
+                <button type="button" class="button" onclick="goTo<?php echo ucfirst($type); ?>Page(<?php echo $total_pages; ?>)">Last »</button>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php
+ }
+
+private function render_mapping_section() {
+    ?>
+    <div class="kt-mapping-section">
+        <div class="kt-mapping-header">
+            <h2>Intelligent Product Mapping Interface</h2>
+            <p class="description">Map supplier products to master products with AI assistance and manual tools.</p>
+            
+            <div class="kt-mapping-actions">
+               
+				<button type="button" class="button-primary kt-auto-match-btn" onclick="runIntelligentMatching()">
+    🧠 Run Intelligent Auto-Matching
+</button>
+				
+                <button type="button" class="button" onclick="refreshMappingStats()">📊 Refresh Stats</button>
+                <button type="button" class="button" onclick="showBrandManager()">🏷️ Manage Brands</button>
+            </div>
+            
+            <!-- Mapping Statistics -->
+            <div id="mapping-stats" class="kt-mapping-stats">
+                <?php $this->render_mapping_stats(); ?>
+            </div>
+        </div>
+        
+        <!-- Mapping Categories Tabs -->
+        <div class="kt-mapping-tabs">
+            <button class="kt-tab-btn active" onclick="showMappingTab('perfect')">✅ Perfect Matches (<span id="perfect-count">0</span>)</button>
+            <button class="kt-tab-btn" onclick="showMappingTab('close')">🎯 Close Matches (<span id="close-count">0</span>)</button>
+            <button class="kt-tab-btn" onclick="showMappingTab('possible')">🤔 Possible Matches (<span id="possible-count">0</span>)</button>
+            <button class="kt-tab-btn" onclick="showMappingTab('no-match')">❌ No Matches (<span id="no-match-count">0</span>)</button>
+            <button class="kt-tab-btn" onclick="showMappingTab('manual')">🔧 Manual Mapping</button>
+        </div>
+        
+        <!-- Perfect Matches Tab -->
+        <div id="perfect-matches-tab" class="kt-mapping-tab-content active">
+            <h3>Perfect Matches (Auto-Mapped)</h3>
+            <div id="perfect-matches-list"></div>
+        </div>
+        
+        <!-- Close Matches Tab -->
+        <div id="close-matches-tab" class="kt-mapping-tab-content">
+            <h3>Close Matches - Review & Confirm</h3>
+            <p class="description">These products have close matches. Review and confirm the best match.</p>
+            <div id="close-matches-list"></div>
+        </div>
+        
+        <!-- Possible Matches Tab -->
+        <div id="possible-matches-tab" class="kt-mapping-tab-content">
+            <h3>Possible Matches - Manual Selection</h3>
+            <p class="description">These products have potential matches. Select the best match or create new product.</p>
+            <div id="possible-matches-list"></div>
+        </div>
+        
+        <!-- No Matches Tab -->
+        <div id="no-match-tab" class="kt-mapping-tab-content">
+            <h3>No Matches - Create New Products</h3>
+            <p class="description">These products need new master product entries.</p>
+            <div id="no-match-list"></div>
+        </div>
+        
+        <!-- Manual Mapping Tab -->
+        <div id="manual-mapping-tab" class="kt-mapping-tab-content">
+            <h3>Manual Search & Mapping</h3>
+            <div class="kt-manual-mapping-interface">
+                <div class="kt-search-section">
+                    <h4>Search Master Products</h4>
+                    <div class="kt-search-controls">
+                        <input type="text" id="master-search-input" placeholder="Search by title, brand, vitola, dimensions..." class="regular-text">
+                        <button type="button" class="button" onclick="searchMasterProducts()">🔍 Search</button>
+                        <button type="button" class="button" onclick="clearMasterSearch()">Clear</button>
+                    </div>
+                    <div id="master-search-results"></div>
+                </div>
+                
+                <div class="kt-create-section">
+                    <h4>Create New Master Product</h4>
+                    <button type="button" class="button-primary" onclick="showQuickCreateForm()">➕ Quick Create from Supplier Data</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modals -->
+    <?php $this->render_mapping_modals(); ?>
+    <?php
+}
+
+private function render_mapping_stats() {
+    global $wpdb;
+    
+    $stats = $wpdb->get_results("
+        SELECT 
+            mapping_status,
+            COUNT(*) as count,
+            AVG(mapping_confidence) as avg_confidence
+        FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        GROUP BY mapping_status
+        ORDER BY 
+            CASE mapping_status
+                WHEN 'perfect_match' THEN 1
+                WHEN 'close_match' THEN 2  
+                WHEN 'possible_match' THEN 3
+                WHEN 'no_match' THEN 4
+                WHEN 'needs_review' THEN 5
+                ELSE 6
+            END
+    ");
+    
+    ?>
+    <div class="kt-stats-grid">
+        <?php foreach ($stats as $stat): ?>
+        <div class="kt-stat-card kt-<?php echo str_replace('_', '-', $stat->mapping_status); ?>">
+            <h4><?php echo ucwords(str_replace('_', ' ', $stat->mapping_status)); ?></h4>
+            <div class="kt-stat-number"><?php echo $stat->count; ?></div>
+            <?php if ($stat->avg_confidence): ?>
+            <small>Avg: <?php echo round($stat->avg_confidence, 1); ?>%</small>
+            <?php endif; ?>
+        </div>
+        <?php endforeach; ?>
+    </div>
+    <?php
+}
+
+private function render_mapping_modals() {
+    ?>
+    <!-- Product Comparison Modal -->
+    <div id="product-comparison-modal" class="kt-modal" style="display:none;">
+        <div class="kt-modal-content kt-modal-large">
+            <span class="kt-modal-close" onclick="closeComparisonModal()">×</span>
+            <h2>Compare Products</h2>
+            
+            <div class="kt-product-comparison">
+                <div class="kt-supplier-product">
+                    <h3>Supplier Product</h3>
+                    <div id="supplier-product-details"></div>
+                </div>
+                
+                <div class="kt-master-suggestions">
+                    <h3>Suggested Master Products</h3>
+                    <div id="master-suggestions-list"></div>
+                </div>
+            </div>
+            
+            <div class="kt-modal-actions">
+                <button type="button" class="button-primary" onclick="confirmMapping()">✅ Confirm Mapping</button>
+                <button type="button" class="button" onclick="rejectMapping()">❌ Reject</button>
+                <button type="button" class="button" onclick="createNewProduct()">➕ Create New</button>
+                <button type="button" class="button" onclick="closeComparisonModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Quick Create Modal -->
+    <div id="quick-create-modal" class="kt-modal" style="display:none;">
+        <div class="kt-modal-content">
+            <span class="kt-modal-close" onclick="closeQuickCreateModal()">×</span>
+            <h2>Quick Create Master Product</h2>
+            
+            <form id="quick-create-form">
+                <input type="hidden" id="source-supplier-id" value="">
+                
+                <table class="form-table">
+                    <tr>
+                        <th><label>Auto-Generated SKU</label></th>
+                        <td>
+                            <input type="text" id="new-sku" readonly class="regular-text">
+                            <button type="button" class="button" onclick="generateNextSKU()">🔄 Generate</button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-title">Product Title *</label></th>
+                        <td><textarea id="new-title" name="title" rows="2" cols="50" required></textarea></td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-brand">Brand *</label></th>
+                        <td>
+                            <input type="text" id="new-brand" name="brand" class="regular-text" required>
+                            <button type="button" class="button" onclick="suggestBrand()">💡 Auto-Fill</button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-ring">Ring Gauge</label></th>
+                        <td><input type="number" id="new-ring" name="ring" min="20" max="80"></td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-length">Length (inches)</label></th>
+                        <td><input type="number" id="new-length" name="length" step="0.1" min="3" max="12"></td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-price">Price</label></th>
+                        <td><input type="number" id="new-price" name="price" step="0.01" min="0"></td>
+                    </tr>
+                    <tr>
+                        <th><label for="new-description">Description</label></th>
+                        <td><textarea id="new-description" name="description" rows="4" cols="50"></textarea></td>
+                    </tr>
+                </table>
+                
+                <p class="submit">
+                    <input type="submit" class="button-primary" value="➕ Create & Map">
+                    <input type="button" class="button" value="Cancel" onclick="closeQuickCreateModal()">
+                </p>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Image Viewer Modal -->
+    <div id="image-viewer-modal" class="kt-modal" style="display:none;">
+        <div class="kt-modal-content">
+            <span class="kt-modal-close" onclick="closeImageViewer()">×</span>
+            <h2>Product Image</h2>
+            <div class="kt-image-container">
+                <img id="enlarged-image" src="" alt="Product Image" style="max-width: 100%; height: auto;">
+            </div>
+        </div>
+    </div>
+    <?php
+}
+private function render_supplier_section() {
+    $page = isset($_GET['supplier_page']) ? max(1, intval($_GET['supplier_page'])) : 1;
+    $per_page = isset($_GET['supplier_per_page']) ? intval($_GET['supplier_per_page']) : 50;
+    $search = isset($_GET['supplier_search']) ? sanitize_text_field($_GET['supplier_search']) : '';
+    $batch_filter = isset($_GET['supplier_batch']) ? sanitize_text_field($_GET['supplier_batch']) : '';
+    
+    ?>
+    <div class="kt-supplier-section">
+        <div class="kt-supplier-header">
+            <h2>Supplier Products (CSV Data)</h2>
+            <p class="description">View uploaded supplier CSV data with extracted keywords.</p>
+            
+           <div class="kt-supplier-filters">
+                <input type="text" id="supplier-search" placeholder="Search supplier products..." class="regular-text" value="<?php echo esc_attr($search); ?>">
+                
+                <select id="supplier-batch-filter">
+                    <option value="">All Batches</option>
+                    <?php $this->render_batch_filter_options(); ?>
+                </select>
+                
+                <select id="supplier-brand-filter">
+                    <option value="">All Brands</option>
+                    <?php $this->render_brand_filter_options(); ?>
+                </select>
+                
+                <select id="supplier-status-filter">
+                    <option value="">All Status</option>
+                    <option value="perfect_match">Perfect Match</option>
+                    <option value="close_match">Close Match</option>
+                    <option value="possible_match">Possible Match</option>
+                    <option value="unmapped">Unmapped</option>
+                    <option value="mapped">Mapped</option>
+                </select>
+                
+                <button type="button" class="button" onclick="searchSupplierProducts()">Search</button>
+                <button type="button" class="button" onclick="clearSupplierFilters()">Clear</button>
+                <button type="button" class="button-primary" onclick="bulkRemapSelected()" id="bulk-remap-btn" style="display:none;">Bulk Remap Selected</button>
+            </div>
+        </div>
+        
+        <div id="supplier-products-list">
+            <?php $this->render_supplier_products_table($search, $batch_filter, $page, $per_page); ?>
+        </div>
+    </div>
+    <?php
+}
+
+private function render_supplier_products_table($search = '', $batch_filter = '', $page = 1, $per_page = 50) {
+    global $wpdb;
+    
+    $brand_filter = isset($_GET['supplier_brand']) ? sanitize_text_field($_GET['supplier_brand']) : '';
+    $status_filter = isset($_GET['supplier_status']) ? sanitize_text_field($_GET['supplier_status']) : '';
+    
+    $where = "WHERE 1=1";
+    $params = array();
+    
+    if (!empty($search)) {
+        $search_param = '%' . $wpdb->esc_like($search) . '%';
+        $where .= " AND (supplier_title LIKE %s OR supplier_brand LIKE %s OR supplier_sku LIKE %s)";
+        $params = array($search_param, $search_param, $search_param);
+    }
+    
+    if (!empty($batch_filter)) {
+        $where .= " AND upload_batch_id = %s";
+        $params[] = $batch_filter;
+    }
+    
+    if (!empty($brand_filter)) {
+        $where .= " AND supplier_brand = %s";
+        $params[] = $brand_filter;
+    }
+    
+    if (!empty($status_filter)) {
+        $where .= " AND mapping_status = %s";
+        $params[] = $status_filter;
+    }
+    
+    // Get total count
+    $count_query = "SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_supplier_products $where";
+    $total_items = empty($params) ? $wpdb->get_var($count_query) : $wpdb->get_var($wpdb->prepare($count_query, $params));
+    
+    $total_pages = ceil($total_items / $per_page);
+    $offset = ($page - 1) * $per_page;
+    
+    // Get products
+    $query = "SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products $where ORDER BY id DESC LIMIT %d OFFSET %d";
+    $final_params = array_merge($params, array($per_page, $offset));
+    $products = $wpdb->get_results($wpdb->prepare($query, $final_params));
+    
+    // Render pagination
+    $this->render_pagination_controls($page, $total_pages, $per_page, $total_items, 'supplier');
+    
+    if ($products) {
+        ?>
+        <table class="widefat striped kt-compact-table">
+            
+        <thead>
+    <tr>
+   <th style="width: 30px;"><input type="checkbox" id="select-all-suppliers" onchange="toggleAllSuppliers()"></th>
+   <th style="width: 60px;">Image</th>      
+    <th style="width: 50px;">ID</th>
+        <th style="width: 100px;">Batch</th>
+        <th style="width: 160px;">SKU / Master Info</th>
+        <th style="width: 280px;">Title</th>
+        <th style="width: 100px;">Brand</th>
+        <th style="width: 60px;">Price</th>
+        <th style="width: 50px;">Qty</th>
+        <th style="width: 80px;">Ring x Length</th>
+        <th style="width: 180px;">Extracted Keywords</th>
+        <th style="width: 80px;">Status</th>
+        <th style="width: 150px;">Actions</th>
+    </tr>
+</thead>
+            
+            <tbody>
+                <?php foreach ($products as $product): ?>
+                
+                <tr>
+    <td><input type="checkbox" class="supplier-checkbox" value="<?php echo $product->id; ?>" onchange="updateBulkRemapButton()"></td>
+    <td>
+        <?php if (!empty($product->supplier_image_url)): ?>
+        <img src="<?php echo esc_url($product->supplier_image_url); ?>" 
+             alt="<?php echo esc_attr($product->supplier_title); ?>" 
+             style="width:40px;height:40px;object-fit:cover;cursor:pointer;"
+             onclick="viewLargerImage('<?php echo esc_js($product->supplier_image_url); ?>')">
+        <?php else: ?>
+        <div style="width:40px;height:40px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;font-size:8px;">No Image</div>
+        <?php endif; ?>
+    </td>
+   <td><?php echo $product->id; ?></td>
+    <td><small><?php echo esc_html($product->upload_batch_id); ?></small></td>
+    <td>
+        <div style="font-size: 11px; line-height: 1.2;">
+            <!-- Always show Supplier ID first -->
+            <div style="color: #666; margin-bottom: 2px;">
+                <strong>Supplier ID:</strong> <?php echo esc_html($product->supplier_sku ?: $product->id); ?>
+            </div>
+            
+            <?php if ($product->mapping_status === 'mapped' || $product->mapping_status === 'perfect_match'): ?>
+                <?php 
+                // Show master product info if mapped
+                global $wpdb;
+                $master_product = $wpdb->get_row($wpdb->prepare("
+                    SELECT sku, product_title FROM xwz_master_products 
+                    WHERE id = %d
+                ", $product->mapped_to_master_id));
+                
+               if ($master_product) {
+    echo '<div style="color: #28a745; border-top: 1px solid #ddd; padding-top: 2px; margin-top: 2px;">';
+    echo '<strong>Master SKU:</strong> ' . esc_html($master_product->sku ?: 'No SKU') . '<br>';
+    
+    $title_display = !empty($master_product->product_title) ? $master_product->product_title : 'No Title';
+    echo '<span style="color: #666;">Title:</span> ' . esc_html(substr($title_display, 0, 300)) . (strlen($title_display) > 300 ? '...' : '');
+    echo '</div>';
+}
+                ?>
+            <?php endif; ?>
+        </div>
+    </td>
+                    
+                    
+                  <td>
+    <div title="<?php echo esc_attr($product->supplier_title); ?>" style="font-size: 12px; line-height: 1.3; word-wrap: break-word; white-space: normal; max-width: none;">
+        <?php echo esc_html($product->supplier_title); ?>
+    </div>
+</td>
+                    
+                
+                <td><small><?php echo esc_html($product->supplier_brand); ?></small></td>
+                    <td><small><?php 
+if (!empty($product->supplier_price_display)) {
+    echo esc_html($product->supplier_price_display);
+} elseif ($product->supplier_price && $product->supplier_price > 0) {
+    echo '$' . number_format($product->supplier_price, 0);
+} else {
+    echo 'N/A';
+}
+?></small></td>
+                    <td><small><?php echo $product->supplier_quantity ?: 'N/A'; ?></small></td>
+                    <td>
+                        <?php 
+                        $ring = 'N/A';
+                        $length = 'N/A';
+                        
+                        if (!empty($product->extracted_keywords)) {
+                            $keywords = maybe_unserialize($product->extracted_keywords);
+                            if (is_array($keywords)) {
+                                foreach ($keywords as $keyword) {
+                                    if (strpos($keyword, 'RING:') === 0) {
+                                        $ring = str_replace('RING:', '', $keyword);
+                                    }
+                                    if (strpos($keyword, 'LENGTH:') === 0) {
+                                        $length_val = str_replace('LENGTH:', '', $keyword);
+                                        $length_val = str_replace('mm', '', $length_val);
+                                        if (is_numeric($length_val) && $length_val > 50) {
+                                            $length = round($length_val / 25.4, 1) . '"';
+                                        } else {
+                                            $length = $length_val;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ?>
+                        <small><?php echo esc_html($ring . ' x ' . $length); ?></small>
+                    </td>
+                    <td>
+                        
+                        
+                        <?php 
+                        $keyword_count = intval($product->keyword_count ?? 0);
+                        
+                        if ($keyword_count > 0) {
+                            echo '<div>';
+                            echo '<span style="color: #46b450;">✓ ' . $keyword_count . ' keywords</span>';
+                         
+                                echo '<button type="button" class="button-small" onclick="viewSupplierDetails(' . $product->id . ')" style="margin-left: 5px;">Details</button>';
+
+                            echo '</div>';
+                            
+                            // Show expandable keywords
+                            $keywords = maybe_unserialize($product->extracted_keywords);
+                            if (is_array($keywords) && !empty($keywords)) {
+                                echo '<div id="supplier-keywords-' . $product->id . '" style="display: none; margin-top: 5px; max-height: 100px; overflow-y: auto; font-size: 10px; border: 1px solid #ddd; padding: 5px; background: #f9f9f9;">';
+                                
+                                // Group keywords by type
+                                $grouped_keywords = array();
+                                foreach ($keywords as $keyword) {
+                                    if (strpos($keyword, ':') !== false) {
+                                        list($type, $value) = explode(':', $keyword, 2);
+                                        $grouped_keywords[$type][] = $value;
+                                    } else {
+                                        $grouped_keywords['OTHER'][] = $keyword;
+                                    }
+                                }
+                                
+                                // Show grouped keywords
+                                foreach ($grouped_keywords as $type => $values) {
+                                    $color = '#666';
+                                    $bg_color = '#e2e3e5';
+                                    
+                                    switch($type) {
+                                        case 'BRAND': $color = '#d63384'; $bg_color = '#f8d7da'; break;
+                                        case 'VITOLA': $color = '#198754'; $bg_color = '#d1e7dd'; break;
+                                        case 'RING': case 'LENGTH': $color = '#0dcaf0'; $bg_color = '#cff4fc'; break;
+                                        case 'MODEL': case 'SERIES': $color = '#6f42c1'; $bg_color = '#e2d9f3'; break;
+                                        case 'YEAR': $color = '#fd7e14'; $bg_color = '#fed7aa'; break;
+                                        case 'COUNT': case 'PACK': $color = '#20c997'; $bg_color = '#c3f7df'; break;
+                                    }
+                                    
+                                    echo '<div><strong style="color: ' . $color . ';">' . ucfirst(strtolower($type)) . ':</strong> ';
+                                    foreach ($values as $value) {
+                                        echo '<span style="background: ' . $bg_color . '; padding: 1px 4px; margin: 1px; border-radius: 2px; display: inline-block;">' . esc_html($value) . '</span> ';
+                                    }
+                                    echo '</div>';
+                                }
+                                echo '</div>';
+                            }
+                        } else {
+                            echo '<span style="color: #dc3232;">✗ No keywords</span>';
+                        }
+                        ?>
+                    </td>
+                    <td>
+                        <small>
+                            <?php 
+                            $status = $product->mapping_status ?? 'unmapped';
+                            $status_colors = array(
+                                'unmapped' => '#666',
+                                'mapped' => '#46b450',
+                                'auto-matched' => '#0073aa'
+                            );
+                            $color = $status_colors[$status] ?? '#666';
+                            ?>
+                            <span style="color: <?php echo $color; ?>;"><?php echo ucfirst($status); ?></span>
+                        </small>
+                    </td>
+                    
+                
+                    <td>
+    <?php if ($product->mapping_status === 'close_match' || $product->mapping_status === 'possible_match' || $product->mapping_status === 'no_match'): ?>
+    <button type="button" class="button-small button-primary" onclick="openMappingSuggestions(<?php echo $product->id; ?>)">Map</button>
+    <?php endif; ?>
+    
+    <?php if ($product->mapping_status === 'mapped' || $product->mapping_status === 'perfect_match'): ?>
+    <button type="button" class="button-small button-primary" onclick="viewMappingDetails(<?php echo $product->id; ?>)">View Mapping</button>
+    <button type="button" class="button-small button-secondary" onclick="remapExistingProduct(<?php echo $product->id; ?>)">Remap</button>
+    <?php endif; ?>
+    
+    <button type="button" class="button-small" onclick="viewSupplierDetails(<?php echo $product->id; ?>)">Details</button>
+    
+    <?php if ($product->mapping_status !== 'mapped' && $product->mapping_status !== 'perfect_match'): ?>
+   <button type="button" class="button-small button-secondary" onclick="createFromSupplier(<?php echo $product->id; ?>)">Create New</button>
+   <button type="button" class="button-small kt-quick-copy-btn" data-supplier-id="<?php echo $product->id; ?>" style="background:#28a745;color:white;">🚀 Quick Copy</button>
+    <?php endif; ?>
+    
+    <button type="button" class="button-small button-link-delete" onclick="deleteSupplierProduct(<?php echo $product->id; ?>)">Delete</button>
+</td>
+                    
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+        // Bottom pagination
+        $this->render_pagination_controls($page, $total_pages, $per_page, $total_items, 'supplier');
+    } else {
+        echo '<p>No supplier products found.</p>';
+    }
+}
+	
+	
+	
+ private function render_batch_filter_options() {
+     global $wpdb;
+       $batches = $wpdb->get_results("
+           SELECT DISTINCT upload_batch_id 
+           FROM {$wpdb->prefix}kt_cigar_supplier_products 
+           ORDER BY upload_batch_id DESC
+       ");
+       
+       foreach ($batches as $batch) {
+           echo '<option value="' . esc_attr($batch->upload_batch_id) . '">' . esc_html($batch->upload_batch_id) . '</option>';
+       }
+ }
+private function render_brand_filter_options() {
+    global $wpdb;
+    $brands = $wpdb->get_results("
+        SELECT DISTINCT supplier_brand 
+        FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE supplier_brand IS NOT NULL AND supplier_brand != ''
+        ORDER BY supplier_brand ASC
+    ");
+    
+    foreach ($brands as $brand) {
+        echo '<option value="' . esc_attr($brand->supplier_brand) . '">' . esc_html($brand->supplier_brand) . '</option>';
+    }
+}
+	
+	
+	
+ private function render_modals() {
+     ?>
+     <!-- Master Product Modal -->
+     <div id="product-modal" class="kt-modal" style="display:none;">
+         <div class="kt-modal-content kt-modal-large">
+             <span class="kt-modal-close" onclick="closeProductModal()">×</span>
+             <h2 id="modal-title">Add New Master Product</h2>
+             <form id="product-form" enctype="multipart/form-data">
+                 <input type="hidden" id="product-id" name="id" value="">
+                 <div class="kt-product-form-grid">
+                     <div class="kt-product-form-left">
+                         <table class="form-table">
+                             <tr>
+                                 <th><label for="product-room-id">Room ID *</label></th>
+                                 <td><input type="number" id="product-room-id" name="room_id" required></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-sku">SKU *</label></th>
+                                 <td><input type="text" id="product-sku" name="sku" required></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-title">Product Title *</label></th>
+                                 <td><textarea id="product-title" name="product_title" rows="3" cols="40" required></textarea></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-category">Category</label></th>
+                                 <td><input type="text" id="product-category" name="product_category"></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-brand">Brand</label></th>
+                                 <td><input type="text" id="product-brand" name="brand"></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-price">Recommended Retail Price</label></th>
+                                 <td><input type="number" id="product-price" name="recommended_retail_price" step="0.01"></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-seat-row">Ring Gauge</label></th>
+                                 <td><input type="text" id="product-seat-row" name="seat_row" placeholder="e.g., 50"></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-seat-number">Length</label></th>
+                                 <td><input type="text" id="product-seat-number" name="seat_number" placeholder="e.g., 5.5"></td>
+                             </tr>
+                             <tr>
+                                 <th><label for="product-featured">Is Featured</label></th>
+                                 <td>
+                                     <select id="product-featured" name="is_featured">
+                                         <option value="0">No</option>
+                                         <option value="1">Yes</option>
+                                     </select>
+                                 </td>
+                             </tr>
+                         </table>
+                     </div>
+                     
+                    <div class="kt-product-form-right">
+    <div class="kt-image-upload-section">
+        <h4>Main Photo</h4>
+        <div id="main-photo-preview">
+            <img id="main-photo-thumb" style="max-width:250px;max-height:250px;display:none;border:1px solid #ddd;border-radius:4px;">
+            <div id="main-photo-placeholder" style="width:250px;height:200px;border:2px dashed #ccc;display:flex;align-items:center;justify-content:center;color:#666;">
+                No image selected
+            </div>
+        </div>
+        <label for="main-photo-url">Image URL:</label>
+        <input type="url" id="main-photo-url" name="main_photo" class="regular-text" placeholder="https://example.com/image.jpg" onchange="updateImagePreview()">
+        <button type="button" class="button" onclick="clearMainPhoto()">Clear</button>
+        
+        <h4 style="margin-top:20px;">Upload New Image</h4>
+        <input type="file" id="main-photo-file" accept="image/*" style="width:100%;">
+        <small>Accepted formats: JPG, PNG, GIF (max 2MB)</small>
+    </div>
+</div>
+     <?php
+ }
+
+ private function write_admin_log($message) {
+     if (function_exists('kt_write_debug_log')) {
+         kt_write_debug_log($message, 'ADMIN');
+     }
+ }
+
+ // AJAX Handlers
+ private function register_ajax_actions() {
+     $ajax_actions = array(
+		 'kt_delete_supplier_product' => 'handle_delete_supplier_product',
+		
+		 'kt_analyze_single_match' => 'handle_analyze_single_match',
+		         'kt_debug_tables' => 'handle_debug_tables',                'kt_bulk_remap_products' => 'handle_bulk_remap_products',
+         'kt_inline_edit_master' => 'handle_inline_edit_master',
+         'kt_get_supplier_for_copy' => 'handle_get_supplier_for_copy',
+         'kt_quick_copy_create' => 'handle_quick_copy_create',
+         'kt_get_next_sku_for_brand' => 'handle_get_next_sku_for_brand',
+		         'kt_get_mapping_details' => 'handle_get_mapping_details',
+
+'kt_get_master_product' => 'handle_get_master_product',
+	'kt_remove_existing_mapping' => 'handle_remove_existing_mapping',	 
+		 
+         'kt_upload_supplier_csv' => 'handle_supplier_csv_upload',
+         'kt_save_master_product' => 'handle_save_master_product',
+         'kt_filter_mapping_data' => 'handle_filter_mapping_data',
+         'kt_search_master_for_mapping' => 'handle_search_master_for_mapping',
+         'kt_get_supplier_product' => 'handle_get_supplier_product',
+         'kt_get_master_product' => 'handle_get_master_product',
+         'kt_create_product_mapping' => 'handle_create_product_mapping',
+         'kt_find_auto_suggestions' => 'handle_find_auto_suggestions',
+         'kt_run_auto_matching' => 'handle_run_auto_matching',
+         'kt_get_current_mappings' => 'handle_get_current_mappings',
+         'kt_delete_mapping' => 'handle_delete_mapping',
+         'kt_delete_supplier_batch' => 'handle_delete_supplier_batch',
+         'kt_search_master_products' => 'handle_search_master_products',
+         'kt_delete_master_product' => 'handle_delete_master_product',
+         'kt_get_mapping_stats' => 'handle_get_mapping_stats',
+         'kt_process_master_products' => 'handle_process_master_products',
+         'kt_get_processing_stats' => 'handle_get_processing_stats',
+         'kt_process_single_master' => 'handle_process_single_master',
+         'kt_test_auto_matching' => 'handle_test_auto_matching',
+         'kt_run_diagnostics' => 'handle_run_diagnostics',
+         'kt_check_data_file' => 'handle_check_data_file',
+         'kt_test_extraction' => 'handle_test_extraction',
+         'kt_clear_debug_logs' => 'handle_clear_debug_logs',
+         'kt_get_debug_stats' => 'handle_get_debug_stats',
+         'kt_clear_and_reprocess_all' => 'handle_clear_and_reprocess_all',
+		 'kt_get_mapping_suggestions' => 'handle_get_mapping_suggestions',
+'kt_confirm_mapping' => 'handle_confirm_mapping', 
+'kt_reject_mapping' => 'handle_reject_mapping',
+'kt_create_and_map' => 'handle_create_and_map',
+'kt_generate_next_sku' => 'handle_generate_next_sku',
+		 'kt_update_price_displays' => 'handle_update_price_displays',
+
+'kt_search_master_detailed' => 'handle_search_master_detailed',
+
+		 
+		 
+		 
+		 
+		 
+		 
+		 
+     );
+       
+       foreach ($ajax_actions as $action => $method) {
+           add_action("wp_ajax_$action", array($this, $method));
+       }
+ }
+
+public function handle_bulk_remap_products() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $product_ids = $_POST['product_ids'];
+    if (!is_array($product_ids)) {
+        wp_send_json_error('Invalid product IDs');
+        return;
+    }
+    
+    global $wpdb;
+    
+    $updated = 0;
+    foreach ($product_ids as $product_id) {
+        $product_id = intval($product_id);
+        
+        // Delete existing mappings
+        $wpdb->delete(
+            $wpdb->prefix . 'kt_cigar_product_mappings',
+            array('supplier_product_id' => $product_id)
+        );
+        
+        // Update supplier status
+        $result = $wpdb->update(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array(
+                'mapping_status' => 'unmapped',
+                'mapped_to_master_id' => null,
+                'mapped_to_master_sku' => null,
+                'mapping_confidence' => 0
+            ),
+            array('id' => $product_id)
+        );
+        
+        if ($result !== false) {
+            $updated++;
+        }
+    }
+    
+    wp_send_json_success("Bulk remapped $updated products");
+}
+
+public function handle_inline_edit_master() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $product_id = intval($_POST['product_id']);
+    $field = sanitize_key($_POST['field']);
+    $value = sanitize_text_field($_POST['value']);
+    
+    // Allowed fields for inline editing
+$allowed_fields = array(
+    'room_id', 'sku', 'product_title', 'product_category', 'product_type', 'brand', 
+    'main_photo', 'multiple_photos', 'recommended_retail_price', 'price_sheet_name',
+    'excel_sheet_name', 'ticket_type', 'seats_reference', 'seat_section', 
+    'seat_row', 'seat_number', 'remark', 'is_featured', 'length_inches'
+);
+    
+    if (!in_array($field, $allowed_fields)) {
+        wp_send_json_error('Field not allowed for editing');
+        return;
+    }
+    
+    global $wpdb;
+    
+    // Prepare value based on field type
+    if (in_array($field, array('recommended_retail_price', 'seat_row', 'seat_number'))) {
+        $value = floatval($value);
+    }
+    
+    $result = $wpdb->update(
+        'xwz_master_products',
+        array($field => $value),
+        array('id' => $product_id),
+        array('%s'),
+        array('%d')
+    );
+    
+    if ($result !== false) {
+        // Reprocess keywords if title or brand changed
+        if (in_array($field, array('product_title', 'brand'))) {
+            $this->process_single_master_product($product_id);
+        }
+        
+        wp_send_json_success('Field updated successfully');
+    } else {
+        wp_send_json_error('Failed to update field');
+    }
+}
+
+public function handle_get_supplier_for_copy() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    
+    global $wpdb;
+    $supplier = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE id = %d
+    ", $supplier_id), ARRAY_A);
+    
+    if ($supplier) {
+        wp_send_json_success($supplier);
+    } else {
+        wp_send_json_error('Supplier product not found');
+    }
+}
+
+public function handle_quick_copy_create() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    $new_product_data = array(
+        'room_id' => 1,
+        'sku' => sanitize_text_field($_POST['sku']),
+        'product_title' => sanitize_textarea_field($_POST['title']),
+        'brand' => sanitize_text_field($_POST['brand']),
+        'seat_row' => floatval($_POST['ring']),
+        'seat_number' => floatval($_POST['length']),
+        'recommended_retail_price' => floatval($_POST['price']),
+        'seats_reference' => sanitize_textarea_field($_POST['description']),
+        'product_type' => 'cigar',
+        'is_featured' => 0
+    );
+    
+    global $wpdb;
+    
+    // Create new master product
+    $result = $wpdb->insert('xwz_master_products', $new_product_data);
+    
+    if ($result) {
+        $new_master_id = $wpdb->insert_id;
+        
+        // Process keywords for new product
+        $this->process_single_master_product($new_master_id);
+        
+        // Create mapping
+        $wpdb->insert(
+            $wpdb->prefix . 'kt_cigar_product_mappings',
+            array(
+                'supplier_product_id' => $supplier_id,
+                'supplier_sku' => '',
+                'supplier_title' => $_POST['title'],
+                'master_product_id' => $new_master_id,
+                'master_product_sku' => $_POST['sku'],
+                'master_product_title' => $_POST['title'],
+                'mapping_type' => 'quick_copy_created',
+                'confidence_score' => 100,
+                'match_summary' => 'Quick copy from supplier product',
+                'created_by' => get_current_user_id()
+            )
+        );
+        
+        // Update supplier status
+        $wpdb->update(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array(
+                'mapping_status' => 'mapped',
+                'mapped_to_master_id' => $new_master_id,
+                'mapped_to_master_sku' => $_POST['sku'],
+                'mapping_confidence' => 100
+            ),
+            array('id' => $supplier_id)
+        );
+        
+        wp_send_json_success(array(
+            'message' => 'Product created and mapped successfully',
+            'new_master_id' => $new_master_id
+        ));
+    } else {
+        wp_send_json_error('Failed to create new product');
+    }
+}
+
+public function handle_get_next_sku_for_brand() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $brand = sanitize_text_field($_POST['brand']);
+    
+    global $wpdb;
+    
+    // Get brand prefix from existing SKUs
+    $brand_skus = $wpdb->get_results($wpdb->prepare("
+        SELECT sku FROM xwz_master_products 
+        WHERE brand LIKE %s AND sku REGEXP '^[A-Z]+[0-9]+$'
+        ORDER BY sku ASC
+    ", '%' . $brand . '%'));
+    
+    $prefix = '';
+    $highest_num = 0;
+    
+    if (!empty($brand_skus)) {
+        foreach ($brand_skus as $sku_row) {
+            if (preg_match('/^([A-Z]+)(\d+)$/', $sku_row->sku, $matches)) {
+                $current_prefix = $matches[1];
+                $current_num = intval($matches[2]);
+                
+                if (empty($prefix)) {
+                    $prefix = $current_prefix;
+                    $highest_num = $current_num;
+                } elseif ($current_prefix === $prefix && $current_num > $highest_num) {
+                    $highest_num = $current_num;
+                }
+            }
+        }
+    }
+    
+    // If no existing SKUs found, generate prefix from brand
+    if (empty($prefix)) {
+        $brand_words = explode(' ', strtoupper($brand));
+        if (count($brand_words) >= 2) {
+            $prefix = substr($brand_words[0], 0, 2) . substr($brand_words[1], 0, 1);
+        } else {
+            $prefix = substr(strtoupper($brand), 0, 3);
+        }
+        $prefix = preg_replace('/[^A-Z]/', '', $prefix);
+        if (strlen($prefix) < 2) {
+            $prefix = 'CIG';
+        }
+    }
+    
+    $next_sku = $prefix . str_pad($highest_num + 1, 3, '0', STR_PAD_LEFT);
+    
+    wp_send_json_success(array(
+        'next_sku' => $next_sku,
+        'prefix' => $prefix,
+        'last_number' => $highest_num,
+        'brand' => $brand
+    ));
+}	
+	public function handle_update_price_displays() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    global $wpdb;
+    
+    // Update existing records with proper price display
+    $products = $wpdb->get_results("
+        SELECT id, supplier_price, raw_csv_data 
+        FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE supplier_price_display IS NULL OR supplier_price_display = ''
+    ");
+    
+    $updated = 0;
+    foreach ($products as $product) {
+        $price_display = 'N/A';
+        
+       if ($product->supplier_price && $product->supplier_price > 0) {
+            $raw_data = maybe_unserialize($product->raw_csv_data);
+            $original_price = '';
+            
+            if (is_array($raw_data)) {
+                $original_price = $raw_data['Price'] ?? $raw_data['price'] ?? '';
+            }
+            
+            if (stripos($original_price, 'MOP') !== false || stripos($original_price, '澳门币') !== false) {
+                $price_display = 'MOP$' . number_format($product->supplier_price, 0);
+            } else {
+                $price_display = '$' . number_format($product->supplier_price, 0);
+            }
+        } else {
+            // TRY TO REPROCESS THE ORIGINAL PRICE
+            $raw_data = maybe_unserialize($product->raw_csv_data);
+            if (is_array($raw_data)) {
+                $original_price = $raw_data['Price'] ?? $raw_data['price'] ?? '';
+                if (!empty($original_price)) {
+                    // REPROCESS PRICE
+                    $price_cleaned = $original_price;
+                    $price_cleaned = str_replace(['MOP$', '/澳门币', '澳门币', '$'], '', $price_cleaned);
+                    $price_cleaned = str_replace(',', '', $price_cleaned);
+                    $price_cleaned = preg_replace('/[^\d.]/', '', $price_cleaned);
+                    $new_price = floatval($price_cleaned);
+                    
+                    if ($new_price > 0) {
+                        // UPDATE THE ACTUAL PRICE TOO
+                        $wpdb->update(
+                            $wpdb->prefix . 'kt_cigar_supplier_products',
+                            array('supplier_price' => $new_price),
+                            array('id' => $product->id)
+                        );
+                        
+                        if (stripos($original_price, 'MOP') !== false || stripos($original_price, '澳门币') !== false) {
+                            $price_display = 'MOP$' . number_format($new_price, 0);
+                        } else {
+                            $price_display = '$' . number_format($new_price, 0);
+                        }
+                    }
+                }
+            }
+        }
+        
+        $wpdb->update(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array('supplier_price_display' => $price_display),
+            array('id' => $product->id)
+        );
+        $updated++;
+    }
+    
+    wp_send_json_success("Updated price display for $updated products");
+}	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+public function handle_get_mapping_details() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    
+    global $wpdb;
+    
+    // Get supplier product
+    $supplier = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE id = %d
+    ", $supplier_id), ARRAY_A);
+    
+    if (!$supplier) {
+        wp_send_json_error('Supplier product not found');
+        return;
+    }
+    
+    // Get mapping info
+    $mapping = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_product_mappings 
+        WHERE supplier_product_id = %d
+        ORDER BY id DESC
+        LIMIT 1
+    ", $supplier_id), ARRAY_A);
+    
+    if (!$mapping) {
+        wp_send_json_error('Mapping not found');
+        return;
+    }
+    
+    // Get master product
+    $master = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM xwz_master_products 
+        WHERE id = %d
+    ", $mapping['master_product_id']), ARRAY_A);
+    
+    if (!$master) {
+        wp_send_json_error('Master product not found');
+        return;
+    }
+    
+    wp_send_json_success(array(
+        'supplier' => $supplier,
+        'master' => $master,
+        'mapping' => $mapping
+    ));
+}
+
+public function handle_remove_existing_mapping() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    
+    global $wpdb;
+    
+    // Delete mapping
+    $mapping_deleted = $wpdb->delete(
+        $wpdb->prefix . 'kt_cigar_product_mappings',
+        array('supplier_product_id' => $supplier_id)
+    );
+    
+    // Update supplier status
+    $supplier_updated = $wpdb->update(
+        $wpdb->prefix . 'kt_cigar_supplier_products',
+        array(
+            'mapping_status' => 'unmapped',
+            'mapped_to_master_id' => null,
+            'mapping_confidence' => 0
+        ),
+        array('id' => $supplier_id)
+    );
+    
+    if ($mapping_deleted !== false && $supplier_updated !== false) {
+        wp_send_json_success('Mapping removed successfully');
+    } else {
+        wp_send_json_error('Failed to remove mapping');
+    }
+}	
+	
+	
+	
+ // NEW: Clear and reprocess all keywords handler
+public function handle_clear_and_reprocess_all() {
+    // Set reasonable limits
+    ini_set('memory_limit', '512M');
+    set_time_limit(600);
+    
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+   global $wpdb;
+    
+    // Get current step from request
+    $step = isset($_POST['step']) ? intval($_POST['step']) : 1;
+    $batch_size = 500; // Standard batch size for 4000 products = 40 batches
+    
+    if ($step === 1) {
+        // Step 1: Clear all keywords
+        $this->write_admin_log("=== STEP 1: CLEARING ALL KEYWORDS ===");
+     $result = $wpdb->query("
+    UPDATE xwz_master_products 
+    SET extracted_keywords = NULL, 
+        keyword_count = 0, 
+        processed_data = NULL, 
+        extraction_status = 'unprocessed' 
+    WHERE product_type COLLATE utf8mb4_unicode_ci = 'cigar' 
+    AND extraction_status = 'processed'
+    AND keyword_count > 0
+    AND id > 0
+");
+        
+        $this->write_admin_log("Cleared keyword data for all master products");
+        
+        $stats = $this->get_master_processing_stats();
+        
+        wp_send_json_success(array(
+            'step' => 1,
+            'next_step' => 2,
+            'stats' => $stats,
+            'message' => 'Keywords cleared. Starting processing...'
+        ));
+    } else {
+        // Step 2+: Process in batches
+    // Remove offset calculation since we're not using OFFSET anymore
+// More efficient query that checks for truly unprocessed products
+$products = $wpdb->get_results($wpdb->prepare("
+    SELECT id FROM xwz_master_products 
+    WHERE product_type = 'cigar' 
+    AND (
+        extraction_status IS NULL 
+        OR extraction_status = '' 
+        OR extraction_status = 'unprocessed' 
+        OR extraction_status = 'retry'
+    )
+    AND extraction_status != 'processing'
+    AND extraction_status != 'processed'
+    AND extraction_status != 'error'
+    ORDER BY id ASC
+    LIMIT %d
+", $batch_size));
+
+        // DEBUG LOG
+        $this->write_admin_log("Step $step: Found " . count($products) . " products to process");
+        
+        if (empty($products)) {
+            // No more products to process
+            $stats = $this->get_master_processing_stats();
+            wp_send_json_success(array(
+                'step' => $step,
+                'next_step' => 0,
+                'complete' => true,
+                'stats' => $stats,
+                'message' => 'Processing complete!'
+            ));
+            return;
+        }
+        
+        $processed = 0;
+        foreach ($products as $product) {
+            if ($this->process_single_master_product($product->id)) {
+                $processed++;
+            }
+            
+            // Force cleanup
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+        }
+        
+        $stats = $this->get_master_processing_stats();
+        
+        // Check if we actually have more work to do
+        $has_more_work = ($stats['unprocessed'] > 0);
+        
+        
+        wp_send_json_success(array(
+            'step' => $step,
+            'next_step' => $has_more_work ? ($step + 1) : 0,
+            'complete' => !$has_more_work,
+            'processed_this_batch' => $processed,
+            'stats' => $stats,
+            'message' => $has_more_work ? "Processed batch $step ($processed products)" : "Processing complete - no more products to process"
+        ));
+    }
+}
+
+public function handle_process_master_products() {
+
+	
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       if (!current_user_can('manage_options')) {
+           wp_die('Insufficient permissions');
+       }
+       
+       // Force batch size to 100 as requested
+       $batch_size = 500;
+       
+       try {
+           $processed = $this->process_existing_master_products_batch($batch_size);
+       } catch (Exception $e) {
+           $this->write_admin_log("Batch processing error: " . $e->getMessage());
+           wp_send_json_error('Batch processing failed: ' . $e->getMessage());
+           return;
+       }
+       $stats = $this->get_master_processing_stats();
+       
+       wp_send_json_success(array(
+           'processed' => $processed,
+           'stats' => $stats,
+           'message' => "Processed $processed master products"
+       ));
+ }
+
+ public function handle_get_processing_stats() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       $stats = $this->get_master_processing_stats();
+       wp_send_json_success($stats);
+ }
+
+ public function handle_process_single_master() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       if (!current_user_can('manage_options')) {
+           wp_die('Insufficient permissions');
+       }
+       
+       $product_id = intval($_POST['product_id']);
+       $result = $this->process_single_master_product($product_id);
+       
+       if ($result) {
+           wp_send_json_success(array('message' => 'Product keywords processed successfully'));
+       } else {
+           wp_send_json_error('Failed to process product keywords');
+       }
+ }
+
+ public function handle_test_auto_matching() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+     if (!current_user_can('manage_options')) {
+         wp_die('Insufficient permissions');
+     }
+
+     $this->write_admin_log("=== AUTO-MATCHING DEBUG TEST START ===");
+
+     // Check for correct classes
+     $classes_status = array(
+         'KT_Cigar_Mappings' => class_exists('KT_Cigar_Mappings'),
+         'KT_Cigar_Brand_Matcher' => class_exists('KT_Cigar_Brand_Matcher')
+     );
+
+     $this->write_admin_log("Class loading status: " . json_encode($classes_status));
+
+     // Check for correct class names
+     if (!$classes_status['KT_Cigar_Mappings'] || !$classes_status['KT_Cigar_Brand_Matcher']) {
+         wp_send_json_error('Required classes not loaded. Check code snippets.');
+         return;
+     }
+
+     // Test with actual data
+     global $wpdb;
+
+     // Get a sample supplier product
+     $supplier_product = $wpdb->get_row("
+         SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+         WHERE mapping_status = 'unmapped' 
+         LIMIT 1
+     ");
+
+     if (!$supplier_product) {
+         wp_send_json_error('No unmapped supplier products found for testing');
+         return;
+     }
+
+     // Get sample master products
+     $master_products = $wpdb->get_results("
+         SELECT * FROM xwz_master_products 
+         WHERE product_type = 'cigar' 
+         AND extraction_status = 'processed'
+         LIMIT 10
+     ", ARRAY_A);
+
+     if (empty($master_products)) {
+         wp_send_json_error('No processed master products found. Process master product keywords first.');
+         return;
+     }
+
+     $this->write_admin_log("Testing with supplier: " . $supplier_product->supplier_title);
+     $this->write_admin_log("Against " . count($master_products) . " master products");
+
+     try {
+         // Use brand-first matching instead of fuzzy matching
+         $matches = KT_Cigar_Brand_Matcher::match_products_by_brand(
+             $supplier_product->supplier_title,
+             $supplier_product->supplier_brand ?? '',
+             $master_products,
+             0.3 // Low threshold for testing
+         );
+         
+         $this->write_admin_log("Found " . count($matches) . " matches");
+         
+         if (!empty($matches)) {
+             $best_match = $matches[0];
+             $this->write_admin_log("Best match: " . $best_match['internal_product']['product_title'] . " (Score: " . $best_match['score'] . "%)");
+             
+             wp_send_json_success(array(
+                 'supplier_title' => $supplier_product->supplier_title,
+                 'supplier_brand' => $supplier_product->supplier_brand ?? 'N/A',
+                 'best_match' => $best_match['internal_product']['product_title'],
+                 'best_match_brand' => $best_match['internal_product']['brand'] ?? 'N/A',
+                 'score' => $best_match['score'],
+                 'total_matches' => count($matches),
+                 'method' => 'brand_first',
+                 'match_details' => $best_match['match_details'] ?? array()
+             ));
+         } else {
+             wp_send_json_success(array(
+                 'supplier_title' => $supplier_product->supplier_title,
+                 'supplier_brand' => $supplier_product->supplier_brand ?? 'N/A',
+                 'message' => 'No matches found',
+                 'score' => 0,
+                 'total_matches' => 0
+             ));
+         }
+         
+     } catch (Exception $e) {
+         $this->write_admin_log("Auto-matching test error: " . $e->getMessage());
+         wp_send_json_error('Auto-matching test failed: ' . $e->getMessage());
+     }
+ }
+
+ public function handle_run_diagnostics() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       if (!current_user_can('manage_options')) {
+           wp_die('Insufficient permissions');
+       }
+       
+       $this->diagnose_auto_matching();
+       wp_send_json_success('Diagnostics completed - check debug logs');
+ }
+
+ public function handle_check_data_file() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       if (!current_user_can('manage_options')) {
+           wp_die('Insufficient permissions');
+       }
+       
+       if (!class_exists('KT_Cigar_Mappings')) {
+           wp_send_json_error('KT_Cigar_Mappings class not loaded');
+           return;
+       }
+       
+       $data_info = KT_Cigar_Mappings::debug_get_data_file_info();
+       wp_send_json_success($data_info);
+ }
+
+ public function handle_test_extraction() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        $title = sanitize_textarea_field($_POST['title'] ?? '');
+        $brand = sanitize_text_field($_POST['brand'] ?? '');
+        
+        if (empty($title)) {
+            wp_send_json_error('Title is required for extraction test');
+        }
+        
+        if (!class_exists('KT_Cigar_Mappings')) {
+            wp_send_json_error('KT_Cigar_Mappings class not loaded. Ensure keyword extraction code snippet is active.');
+        }
+        
+     try {
+    // ENHANCED: Test helper integration
+    $clean_title = KT_Cigar_Data_Helper::clean_text_enhanced($title);
+    $result = KT_Cigar_Mappings::process_supplier_product($clean_title, $brand);
+    
+    // ENHANCED: Test helper functions
+    $chinese_vitola = KT_Cigar_Data_Helper::get_chinese_vitola($title);
+    $packaging_type = KT_Cigar_Data_Helper::identify_packaging_type($title);
+    $chinese_model = KT_Cigar_Data_Helper::extract_chinese_model($title);
+    
+    // Add helper results to test output
+    $result['helper_tests'] = array(
+        'cleaned_title' => $clean_title,
+        'chinese_vitola' => $chinese_vitola,
+        'packaging_type' => $packaging_type,
+        'chinese_model' => $chinese_model
+    );
+
+            
+           wp_send_json_success(array(
+    'title' => $title,
+    'cleaned_title' => $result['helper_tests']['cleaned_title'] ?? $title,
+    'brand' => $result['brand'] ?? 'None detected',
+    'vitola' => $result['vitola'] ?? 'None detected',
+    'chinese_vitola_detected' => $result['helper_tests']['chinese_vitola'] ?? 'None',
+    'packaging_type_detected' => $result['helper_tests']['packaging_type'] ?? 'None',
+    'chinese_model_detected' => isset($result['helper_tests']['chinese_model']['value']) ? $result['helper_tests']['chinese_model']['value'] : 'None',
+    'keywords_count' => count($result['keywords']),
+    'keywords' => $result['keywords'],
+    'dimensions' => $result['dimension_info'] ?? array(),
+    'special_edition' => $result['special_edition'] ?? 'None',
+    'year' => $result['year'] ?? 'None',
+    'count' => $result['count'] ?? 'None',
+    'packaging' => $result['packaging'] ?? 'None'
+));
+
+            
+        } catch (Exception $e) {
+            wp_send_json_error('Extraction failed: ' . $e->getMessage());
+        }
+ }
+
+ public function handle_clear_debug_logs() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        $log_file = WP_CONTENT_DIR . '/cigar-debug.log';
+        
+        if (file_exists($log_file)) {
+            file_put_contents($log_file, '');
+            wp_send_json_success('Debug logs cleared successfully');
+        } else {
+            wp_send_json_error('Debug log file not found');
+        }
+ }
+
+
+
+// ADD THE 3 NEW FUNCTIONS HERE:
+public function handle_get_mapping_suggestions() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    
+    global $wpdb;
+    $supplier = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE id = %d
+    ", $supplier_id), ARRAY_A);
+    
+    if (!$supplier) {
+        wp_send_json_error('Supplier product not found');
+        return;
+    }
+    
+    $suggestions = maybe_unserialize($supplier['processed_data']);
+    
+    wp_send_json_success(array(
+        'supplier' => $supplier,
+        'suggestions' => $suggestions['suggested_matches'] ?? array()
+    ));
+}
+
+public function handle_generate_next_sku() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    
+    global $wpdb;
+    
+    // Get the highest numeric SKU
+    $latest_sku = $wpdb->get_var("
+        SELECT sku FROM xwz_master_products 
+        WHERE sku REGEXP '^[A-Z]+[0-9]+$'
+        ORDER BY CAST(SUBSTRING(sku, LOCATE(REGEXP_REPLACE(sku, '[^0-9]', ''), sku)) AS UNSIGNED) DESC
+        LIMIT 1
+    ");
+    
+    $next_number = 1;
+    if ($latest_sku && preg_match('/([A-Z]+)(\d+)/', $latest_sku, $matches)) {
+        $prefix = $matches[1];
+        $number = intval($matches[2]);
+        $next_number = $number + 1;
+    } else {
+        $prefix = 'CIG'; // Default prefix
+    }
+    
+    $next_sku = $prefix . str_pad($next_number, 4, '0', STR_PAD_LEFT);
+    
+    wp_send_json_success(array('next_sku' => $next_sku));
+}
+
+public function handle_search_master_detailed() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    
+    $search = sanitize_text_field($_POST['search'] ?? '');
+    
+    global $wpdb;
+    
+    $where = "WHERE product_type = 'cigar'";
+    $params = array();
+    
+    if (!empty($search)) {
+        $search_param = '%' . $wpdb->esc_like($search) . '%';
+        $where .= " AND (product_title LIKE %s OR brand LIKE %s OR sku LIKE %s OR seats_reference LIKE %s OR extracted_keywords LIKE %s)";
+        $params = array($search_param, $search_param, $search_param, $search_param, $search_param);
+    }
+    
+    $query = "SELECT * FROM xwz_master_products $where ORDER BY id DESC LIMIT 50";
+    $products = empty($params) ? $wpdb->get_results($query, ARRAY_A) : $wpdb->get_results($wpdb->prepare($query, $params), ARRAY_A);
+    
+    wp_send_json_success(array('products' => $products));
+}
+
+public function handle_confirm_mapping() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    $master_id = intval($_POST['master_id']);
+    
+    global $wpdb;
+    
+    // Get supplier product details
+    $supplier = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE id = %d
+    ", $supplier_id), ARRAY_A);
+    
+    // Get master product details
+    $master = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM xwz_master_products 
+        WHERE id = %d
+    ", $master_id), ARRAY_A);
+    
+    if (!$supplier || !$master) {
+        wp_send_json_error('Supplier or master product not found');
+        return;
+    }
+    
+    // Create ENHANCED mapping with all details
+    $mapping_result = $wpdb->insert(
+        $wpdb->prefix . 'kt_cigar_product_mappings',
+        array(
+            'supplier_product_id' => $supplier_id,
+            'supplier_sku' => $supplier['supplier_sku'],
+            'supplier_title' => $supplier['supplier_title'],
+            'master_product_id' => $master_id,
+            'master_product_sku' => $master['sku'],
+            'master_product_title' => $master['product_title'],
+            'mapping_type' => 'manual_confirmed',
+            'confidence_score' => 95,
+            'match_summary' => sprintf(
+                'Manual mapping: %s -> %s (SKU: %s)', 
+                substr($supplier['supplier_title'], 0, 50),
+                substr($master['product_title'], 0, 50),
+                $master['sku']
+            ),
+            'created_by' => get_current_user_id()
+        )
+    );
+    
+    if ($mapping_result) {
+        // Update supplier status WITH master SKU
+        $wpdb->update(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array(
+                'mapping_status' => 'mapped',
+                'mapped_to_master_id' => $master_id,
+                'mapped_to_master_sku' => $master['sku'],
+                'mapping_confidence' => 95
+            ),
+            array('id' => $supplier_id)
+        );
+        
+        wp_send_json_success('Mapping confirmed successfully with master SKU: ' . $master['sku']);
+    } else {
+        wp_send_json_error('Failed to create mapping: ' . $wpdb->last_error);
+    }
+}
+public function handle_reject_mapping() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    
+    global $wpdb;
+    
+    // Mark as rejected
+    $wpdb->update(
+        $wpdb->prefix . 'kt_cigar_supplier_products',
+        array('mapping_status' => 'rejected'),
+        array('id' => $supplier_id)
+    );
+    
+    wp_send_json_success('Mapping rejected');
+}
+
+public function handle_create_and_map() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    $new_product_data = array(
+        'room_id' => 1,
+        'sku' => sanitize_text_field($_POST['sku']),
+        'product_title' => sanitize_textarea_field($_POST['title']),
+        'brand' => sanitize_text_field($_POST['brand']),
+        'seat_row' => intval($_POST['ring']),
+        'seat_number' => floatval($_POST['length']),
+        'recommended_retail_price' => floatval($_POST['price']),
+        'seats_reference' => sanitize_textarea_field($_POST['description']),
+        'product_type' => 'cigar',
+        'is_featured' => 0
+    );
+    
+    global $wpdb;
+    
+    // Create new master product
+    $result = $wpdb->insert('xwz_master_products', $new_product_data);
+    
+    if ($result) {
+        $new_master_id = $wpdb->insert_id;
+        
+        // Process keywords for new product
+        $this->process_single_master_product($new_master_id);
+        
+        // Create mapping
+        $wpdb->insert(
+            $wpdb->prefix . 'kt_cigar_product_mappings',
+            array(
+                'supplier_product_id' => $supplier_id,
+                'master_product_id' => $new_master_id,
+                'mapping_type' => 'created_and_mapped',
+                'confidence_score' => 100,
+                'created_by' => get_current_user_id()
+            )
+        );
+        
+        // Update supplier status
+        $wpdb->update(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array(
+                'mapping_status' => 'mapped',
+                'mapped_to_master_id' => $new_master_id,
+                'mapping_confidence' => 100
+            ),
+            array('id' => $supplier_id)
+        );
+        
+        wp_send_json_success(array(
+            'message' => 'New product created and mapped successfully',
+            'new_master_id' => $new_master_id
+        ));
+    } else {
+        wp_send_json_error('Failed to create new product');
+    }
+}	
+	
+	
+ public function handle_get_debug_stats() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
+        
+        $log_file = WP_CONTENT_DIR . '/cigar-debug.log';
+        $stats = array();
+        
+        if (file_exists($log_file)) {
+            $stats['file_exists'] = true;
+            $stats['file_size'] = filesize($log_file);
+            $stats['file_size_readable'] = size_format($stats['file_size']);
+            $stats['last_modified'] = date('Y-m-d H:i:s', filemtime($log_file));
+            
+            // Count lines
+            $content = file_get_contents($log_file);
+            $lines = explode("\n", $content);
+            $stats['total_lines'] = count($lines);
+            
+            // Count recent entries (last 24 hours)
+            $recent_count = 0;
+            $yesterday = date('Y-m-d', strtotime('-1 day'));
+            foreach ($lines as $line) {
+                if (strpos($line, date('Y-m-d')) !== false || strpos($line, $yesterday) !== false) {
+                    $recent_count++;
+                }
+            }
+            $stats['recent_entries'] = $recent_count;
+            
+        } else {
+            $stats['file_exists'] = false;
+            $stats['file_size'] = 0;
+            $stats['total_lines'] = 0;
+            $stats['recent_entries'] = 0;
+        }
+        
+        wp_send_json_success($stats);
+ }
+
+public function handle_delete_supplier_product() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    global $wpdb;
+    
+    $product_id = intval($_POST['product_id']);
+    
+    // Delete associated mappings first
+    $wpdb->delete($wpdb->prefix . 'kt_cigar_product_mappings', array('supplier_product_id' => $product_id));
+    
+    // Delete supplier product
+    $result = $wpdb->delete($wpdb->prefix . 'kt_cigar_supplier_products', array('id' => $product_id));
+    
+    if ($result) {
+        wp_send_json_success('Supplier product deleted successfully');
+    } else {
+        wp_send_json_error('Failed to delete supplier product');
+    }
+}	
+	
+
+public function handle_delete_supplier_batch() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    global $wpdb;
+    
+    $batch_id = sanitize_text_field($_POST['batch_id']);
+    
+    if (empty($batch_id)) {
+        wp_send_json_error('Invalid batch ID');
+        return;
+    }
+    
+    $this->write_admin_log("Attempting to delete batch: $batch_id");
+    
+    // Start transaction
+    $wpdb->query('START TRANSACTION');
+    
+    try {
+        // First, get count of products in this batch
+        $product_count = $wpdb->get_var($wpdb->prepare("
+            SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_supplier_products 
+            WHERE upload_batch_id = %s
+        ", $batch_id));
+        
+        if ($product_count == 0) {
+            wp_send_json_error('Batch not found or already empty');
+            return;
+        }
+        
+        // Delete associated mappings first  
+        $mappings_deleted = $wpdb->query($wpdb->prepare("
+            DELETE FROM {$wpdb->prefix}kt_cigar_product_mappings 
+            WHERE supplier_product_id IN (
+                SELECT id FROM {$wpdb->prefix}kt_cigar_supplier_products 
+                WHERE upload_batch_id = %s
+            )
+        ", $batch_id));
+        
+        // Delete supplier products in this batch
+        $products_deleted = $wpdb->delete(
+            $wpdb->prefix . 'kt_cigar_supplier_products',
+            array('upload_batch_id' => $batch_id),
+            array('%s')
+        );
+        
+        if ($products_deleted === false) {
+            throw new Exception('Failed to delete products: ' . $wpdb->last_error);
+        }
+        
+        // Commit transaction
+        $wpdb->query('COMMIT');
+        
+        $this->write_admin_log("Successfully deleted batch '$batch_id': $products_deleted products, $mappings_deleted mappings");
+        
+        wp_send_json_success(array(
+            'message' => "Batch '$batch_id' deleted successfully",
+            'products_deleted' => $products_deleted,
+            'mappings_deleted' => $mappings_deleted
+        ));
+        
+    } catch (Exception $e) {
+        // Rollback on error
+        $wpdb->query('ROLLBACK');
+        $this->write_admin_log("Failed to delete batch '$batch_id': " . $e->getMessage());
+        wp_send_json_error('Failed to delete supplier batch: ' . $e->getMessage());
+    }
+}
+	
+	
+	
+	
+	
+ // Diagnostic method to check auto-matching setup
+ public function diagnose_auto_matching() {
+     $this->write_admin_log("=== AUTO-MATCHING DIAGNOSTIC START ===");
+       global $wpdb;
+       
+       // FIXED: Check for correct classes
+       $classes = array(
+           'KT_Cigar_Mappings' => class_exists('KT_Cigar_Mappings'),
+           'KT_Cigar_Brand_Matcher' => class_exists('KT_Cigar_Brand_Matcher')
+       );
+       $this->write_admin_log("Classes loaded: " . json_encode($classes));
+       
+       // Check data file
+       if (class_exists('KT_Cigar_Mappings')) {
+           $data_info = KT_Cigar_Mappings::debug_get_data_file_info();
+           $this->write_admin_log("Data file info: " . json_encode($data_info));
+       }
+       
+       // Check database state
+       $supplier_count = $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}kt_cigar_supplier_products WHERE mapping_status = 'unmapped'");
+       $master_processed = $wpdb->get_var("SELECT COUNT(*) FROM xwz_master_products WHERE product_type = 'cigar' AND extraction_status = 'processed'");
+       
+       $this->write_admin_log("Unmapped supplier products: " . $supplier_count);
+       $this->write_admin_log("Processed master products: " . $master_processed);
+       
+       // Sample test
+       if ($supplier_count > 0 && $master_processed > 0) {
+           $this->write_admin_log("Running sample auto-matching test...");
+       }
+       
+       $this->write_admin_log("=== AUTO-MATCHING DIAGNOSTIC END ===");
+ }
+
+ public function handle_supplier_csv_upload() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+     if (!current_user_can('manage_options')) {
+         wp_die('Insufficient permissions');
+     }
+     
+     $this->write_admin_log("Supplier CSV upload started");
+     
+     if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
+         wp_send_json_error('File upload failed');
+     }
+     
+     $file_path = $_FILES['csv_file']['tmp_name'];
+     $delimiter = $_POST['delimiter'] ?? ',';
+     $batch_name = sanitize_text_field($_POST['batch_name'] ?? '');
+     
+     if (empty($batch_name)) {$batch_name = 'batch_' . date('Y-m-d_H-i-s');
+     }
+     
+     $results = $this->process_supplier_csv_file($file_path, $delimiter, $batch_name);
+     wp_send_json_success($results);
+ }
+
+ /**
+ * FIXED CSV Processing Pipeline - Properly Captures Packaging Information
+ * Replace your existing process_supplier_csv_file method with this enhanced version
+ */
+private function process_supplier_csv_file($file_path, $delimiter = ',', $batch_name = '') {
+    global $wpdb;
+    $this->write_admin_log("Processing CSV file: $batch_name");
+    
+    if (!$this->ensure_kt_mappings_loaded()) {
+        return array('error' => 'KT_Cigar_Mappings not available');
+    }
+    
+    $handle = fopen($file_path, 'r');
+    if (!$handle) {
+        return array('error' => 'Could not open CSV file');
+    }
+    
+    $headers = fgetcsv($handle, 0, $delimiter);
+    if (!$headers) {
+        fclose($handle);
+        return array('error' => 'Could not read CSV headers');
+    }
+    
+    $headers = array_map('trim', $headers);
+    $this->write_admin_log("CSV headers: " . implode(', ', $headers));
+    
+    $processed = 0;
+    $errors = 0;
+    $supplier_table = $wpdb->prefix . 'kt_cigar_supplier_products';
+    
+    while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
+        if (count($row) !== count($headers)) {
+            $errors++;
+            continue;
+        }
+        
+        $data = array_combine($headers, $row);
+        
+        // Extract key fields - flexible mapping for your CSV structure
+        $title = $data['Title'] ?? $data['title'] ?? $data['product_title'] ?? $data['name'] ?? '';
+        $brand = $data['Brand'] ?? $data['brand'] ?? $data['manufacturer'] ?? '';
+        $sku = $data['ID'] ?? $data['sku'] ?? $data['product_code'] ?? '';
+ // ENHANCED PRICE PROCESSING
+        
+		// ENHANCED PRICE PROCESSING - FIXED for MOP currency
+        $price_raw = $data['Price'] ?? $data['price'] ?? $data['cost'] ?? '0';
+        
+        // Clean and convert price to decimal - BETTER CLEANING
+        $price_cleaned = $price_raw;
+        $price_cleaned = str_replace(['MOP$', '/澳门币', '澳门币', '$'], '', $price_cleaned);
+        $price_cleaned = str_replace(',', '', $price_cleaned); // Remove commas
+        $price_cleaned = preg_replace('/[^\d.]/', '', $price_cleaned); // Keep only digits and dots
+        $price = floatval($price_cleaned);
+        
+        // Format display price
+        if ($price > 0) {
+            if (stripos($price_raw, 'MOP') !== false || stripos($price_raw, '澳门币') !== false) {
+                $price_display = 'MOP$' . number_format($price, 0);
+            } else {
+                $price_display = '$' . number_format($price, 0);
+            }
+        } else {
+            $price_display = 'N/A';
+        }
+        
+        // DEBUG LOG
+        $this->write_admin_log("Price processing: '$price_raw' -> cleaned: '$price_cleaned' -> final: $price -> display: '$price_display'");
+		
+		$quantity = intval($data['Quantity'] ?? $data['quantity'] ?? $data['stock'] ?? 0);
+        $description = $data['Description'] ?? $data['description'] ?? $data['details'] ?? '';
+        $image_url = $data['Image URL'] ?? $data['image'] ?? $data['image_url'] ?? '';
+        
+        // EXTRACT cigar-specific fields from your CSV
+        $ring_size = $data['Ring Size'] ?? '';
+        $length = $data['Length'] ?? '';
+        $packaging = $data['Packaging'] ?? '';
+        $main_category = $data['Main Category'] ?? '';
+        $sub_categories = $data['Sub Categories'] ?? '';
+        
+        if (empty($title)) {
+            $errors++;
+            continue;
+        }
+        
+        // ENHANCED: Combine title with description for better extraction
+        $combined_text = $title;
+        if (!empty($description)) {
+            $combined_text .= ' ' . $description;
+        }
+        
+        // DEBUG: Log the title we're about to process
+        $this->write_admin_log("🔍 CSV PROCESSING TITLE: '$title'");
+        if (!empty($description)) {
+            $this->write_admin_log("🔍 CSV DESCRIPTION: '$description'");
+        }
+        
+        // USE ULTRA-INTELLIGENT EXTRACTION SYSTEM with combined text
+        $processed_data = KT_Cigar_Mappings::process_supplier_product($combined_text, $brand, $description);
+        
+        // ENHANCED: Log extraction results for debugging
+        $this->write_admin_log("🧠 CSV extraction for '$title':");
+        $this->write_admin_log("   Keywords found: " . count($processed_data['keywords']));
+        $this->write_admin_log("   Count: " . ($processed_data['count'] ?? 'NONE'));
+        $this->write_admin_log("   Packaging: " . ($processed_data['packaging'] ?? 'NONE'));
+        $this->write_admin_log("   Ring: " . ($processed_data['ring_gauge'] ?? 'NONE'));
+        $this->write_admin_log("   Length: " . ($processed_data['length'] ?? 'NONE'));
+        $this->write_admin_log("   Brand: " . ($processed_data['brand'] ?? 'NONE'));
+        
+        // ENHANCED: Add CSV-specific fields if extraction missed them
+        if (empty($processed_data['ring_gauge']) && !empty($ring_size) && is_numeric($ring_size)) {
+            $processed_data['ring_gauge'] = intval($ring_size);
+            $processed_data['keywords'][] = "RING:" . $ring_size;
+            $this->write_admin_log("✅ Added ring gauge from CSV column: $ring_size");
+        }
+        
+        if (empty($processed_data['length']) && !empty($length) && is_numeric($length)) {
+            $length_mm = floatval($length);
+            // Convert inches to mm if needed
+            if ($length_mm >= 3 && $length_mm <= 12) {
+                $length_mm = round($length_mm * 25.4);
+            }
+            $processed_data['length'] = $length_mm;
+            $processed_data['length_mm'] = $length_mm;
+            $processed_data['keywords'][] = "LENGTH:" . $length_mm . "mm";
+            $this->write_admin_log("✅ Added length from CSV column: $length_mm mm");
+        }
+        
+        if (empty($processed_data['packaging']) && !empty($packaging)) {
+            $processed_data['packaging'] = $packaging;
+            $processed_data['keywords'][] = "PACKAGING:" . $packaging;
+            $this->write_admin_log("✅ Added packaging from CSV column: $packaging");
+        }
+        
+        // ENHANCED: Special handling for Chinese packaging patterns in title
+        if (empty($processed_data['count']) || $processed_data['count'] === 'N/A') {
+            $manual_count = $this->extract_count_from_csv_title($title);
+            if ($manual_count) {
+                $processed_data['count'] = $manual_count['count'];
+                $processed_data['packaging'] = $manual_count['packaging'];
+                $processed_data['keywords'][] = "COUNT:" . $manual_count['count'];
+                $processed_data['keywords'][] = "PACK:" . $manual_count['packaging'];
+                $this->write_admin_log("✅ Manual count extraction: " . $manual_count['count'] . " " . $manual_count['packaging']);
+            }
+        }
+        
+        // Apply learning system
+        if (class_exists('KT_Cigar_Learning_System')) {
+            foreach ($processed_data['keywords'] as $keyword) {
+                if (strpos($keyword, ':') !== false) {
+                    list($type, $value) = explode(':', $keyword, 2);
+                    KT_Cigar_Learning_System::learn_successful_pattern($title, strtolower($type), $value, 'csv_import');
+                }
+            }
+        }
+        
+        // FINAL DEBUG: Log what we're inserting
+        $this->write_admin_log("💾 INSERTING: " . count($processed_data['keywords']) . " keywords");
+        $this->write_admin_log("   Final Count: " . ($processed_data['count'] ?? 'N/A'));
+        $this->write_admin_log("   Final Packaging: " . ($processed_data['packaging'] ?? 'N/A'));
+        
+       // Enhanced insert with price display
+        $insert_result = $wpdb->insert($supplier_table, array(
+            'upload_batch_id' => $batch_name,
+            'supplier_sku' => $sku,
+            'supplier_title' => $title,
+            'supplier_brand' => $brand,
+            'supplier_price' => $price,
+            'supplier_price_display' => $price_display,
+            'supplier_quantity' => $quantity,
+            'supplier_description' => $description,
+            'supplier_image_url' => $image_url,
+            'raw_csv_data' => maybe_serialize($data),
+            'extracted_keywords' => maybe_serialize($processed_data['keywords']),
+            'keyword_count' => count($processed_data['keywords']),
+            'processed_data' => maybe_serialize($processed_data),
+            'mapping_status' => 'unmapped'
+        ));
+        
+        if ($insert_result) {
+            $processed++;
+            $this->write_admin_log("✅ Successfully inserted product: $title");
+        } else {
+            $errors++;
+            $this->write_admin_log("❌ Failed to insert row: " . $wpdb->last_error);
+        }
+    }
+    
+    fclose($handle);
+    
+    $this->write_admin_log("CSV processing complete: $processed processed, $errors errors");
+    
+    return array(
+        'processed' => $processed,
+        'errors' => $errors,
+        'batch_name' => $batch_name,
+        'message' => "Successfully processed $processed products with $errors errors"
+    );
+}
+
+/**
+ * ENHANCED: Manual count extraction for CSV titles
+ * This is a backup extraction method specifically for CSV processing
+ */
+private function extract_count_from_csv_title($title) {
+    $this->write_admin_log("🔍 Manual count extraction from CSV title: '$title'");
+    
+    // Chinese count patterns that are common in supplier CSVs
+    $patterns = array(
+        // Standard patterns: 25支, 10支, 5支
+        '/(\d+)支/' => array('unit' => 'pieces', 'confidence' => 0.95),
+        
+        // Box patterns: (25支/盒), （10支/盒）
+        '/[（\(](\d+)支[\/／][盒箱][）\)]/' => array('unit' => 'box', 'confidence' => 0.90),
+        
+        // Multi-box patterns: 25支(5盒), 15支(3盒)
+        '/(\d+)支[（\(](\d+)盒[）\)]/' => array('unit' => 'multi_box', 'confidence' => 0.95),
+        
+        // Bundle patterns: 25条, 10条
+        '/(\d+)条/' => array('unit' => 'bundle', 'confidence' => 0.85),
+        
+        // Pack patterns: 20包, 10包
+        '/(\d+)包/' => array('unit' => 'pack', 'confidence' => 0.80),
+        
+        // Tube patterns: 3管, 5管
+        '/(\d+)管/' => array('unit' => 'tube', 'confidence' => 0.85),
+    );
+    
+    foreach ($patterns as $pattern => $config) {
+        if (preg_match($pattern, $title, $matches)) {
+            $count = intval($matches[1]);
+            
+            // Validate count range
+            if ($count >= 1 && $count <= 1000) {
+                $result = array(
+                    'count' => $count,
+                    'packaging' => $config['unit'],
+                    'confidence' => $config['confidence'],
+                    'pattern' => $matches[0]
+                );
+                
+                // Handle multi-box format specially
+                if ($config['unit'] === 'multi_box' && isset($matches[2])) {
+                    $box_count = intval($matches[2]);
+                    $result['box_count'] = $box_count;
+                    $result['per_box'] = intval($count / $box_count);
+                    $result['packaging'] = 'box';
+                }
+                
+                $this->write_admin_log("✅ Manual extraction success: " . json_encode($result));
+                return $result;
+            }
+        }
+    }
+    
+    $this->write_admin_log("❌ Manual count extraction failed");
+    return null;
+}
+
+/**
+ * ENHANCED: Add debugging method to test extraction on specific titles
+ */
+public function debug_test_csv_extraction($title, $brand = '') {
+    if (!$this->ensure_kt_mappings_loaded()) {
+        return array('error' => 'KT_Cigar_Mappings not available');
+    }
+    
+    $this->write_admin_log("🧪 DEBUG TEST: '$title' | Brand: '$brand'");
+    
+    // Test the extraction
+    $processed_data = KT_Cigar_Mappings::process_supplier_product($title, $brand);
+    
+    // Test manual count extraction
+    $manual_count = $this->extract_count_from_csv_title($title);
+    
+    $result = array(
+        'title' => $title,
+        'brand' => $brand,
+        'extraction_result' => $processed_data,
+        'manual_count_result' => $manual_count,
+        'final_keywords' => $processed_data['keywords'],
+        'keyword_count' => count($processed_data['keywords']),
+        'has_count' => !empty($processed_data['count']) && $processed_data['count'] !== 'N/A',
+        'has_packaging' => !empty($processed_data['packaging']) && $processed_data['packaging'] !== 'N/A'
+    );
+    
+    $this->write_admin_log("🧪 DEBUG RESULT: " . json_encode($result, JSON_UNESCAPED_UNICODE));
+    
+    return $result;
+}
+public function handle_run_auto_matching() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+
+    $this->write_admin_log("=== INTELLIGENT AUTO-MATCHING START ===");
+
+    if (!class_exists('KT_Cigar_Brand_Matcher')) {
+        wp_send_json_error('KT_Cigar_Brand_Matcher class not found. Check code snippets.');
+        return;
+    }
+
+    global $wpdb;
+
+    // Get unmapped supplier products
+    $supplier_products = $wpdb->get_results("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE mapping_status = 'unmapped' 
+        ORDER BY id ASC 
+        LIMIT 500
+    ");
+
+    if (empty($supplier_products)) {
+        wp_send_json_error('No unmapped supplier products found');
+        return;
+    }
+
+    // Get processed master products
+    $master_products = $wpdb->get_results("
+        SELECT * FROM xwz_master_products 
+        WHERE product_type = 'cigar' 
+        AND extraction_status = 'processed' 
+        AND keyword_count > 0
+    ", ARRAY_A);
+
+    if (empty($master_products)) {
+        wp_send_json_error('No processed master products found. Process master product keywords first.');
+        return;
+    }
+
+    $this->write_admin_log("Starting intelligent auto-matching: " . count($supplier_products) . " supplier products against " . count($master_products) . " master products");
+
+    $perfect_matches = 0;
+    $close_matches = 0;
+    $possible_matches = 0;
+    $no_matches = 0;
+
+    foreach ($supplier_products as $supplier) {
+        try {
+            $matches = KT_Cigar_Brand_Matcher::match_products_by_brand(
+                $supplier->supplier_title,
+                $supplier->supplier_brand ?? '',
+                $master_products,
+                0.3 // Lower threshold to capture more possibilities
+            );
+            
+            if (!empty($matches)) {
+                $best_match = $matches[0];
+                $confidence = $best_match['score'];
+               $master_product_id = $best_match['internal_product']['id'] ?? null;
+$master_product_sku = $best_match['internal_product']['sku'] ?? '';
+$master_product_title = $best_match['internal_product']['product_title'] ?? ''; 
+				
+				
+				if (!$master_product_id) {
+    $this->write_admin_log("ERROR: No master product ID found for supplier {$supplier->id}");
+    continue;
+}
+				
+				
+				
+                // Categorize matches by confidence
+                if ($confidence >= 85) {
+                    // Perfect match - auto-map
+                   $mapping_result = $wpdb->insert(
+    $wpdb->prefix . 'kt_cigar_product_mappings',
+    array(
+        'supplier_product_id' => $supplier->id,
+        'supplier_sku' => $supplier->supplier_sku,
+        'supplier_title' => $supplier->supplier_title,
+        'master_product_id' => $master_product_id,
+        'master_product_sku' => $master_product_sku,
+        'master_product_title' => $master_product_title,
+                            'mapping_type' => 'perfect_auto',
+                            'confidence_score' => $confidence,
+                            'mapping_details' => maybe_serialize($best_match['match_details'] ?? array()),
+                            'created_by' => get_current_user_id()
+                        )
+                    );
+                    
+                 if ($mapping_result) {
+    $wpdb->update(
+        $wpdb->prefix . 'kt_cigar_supplier_products',
+        array(
+            'mapping_status' => 'perfect_match',
+            'mapped_to_master_id' => $master_product_id,
+            'mapped_to_master_sku' => $master_product_sku,
+            'mapping_confidence' => $confidence
+        ),
+        array('id' => $supplier->id)
+    );
+    $perfect_matches++;
+}
+					
+                } elseif ($confidence >= 65) {
+                    // Close match - needs review
+                    $wpdb->update(
+                        $wpdb->prefix . 'kt_cigar_supplier_products',
+                        array(
+                            'mapping_status' => 'close_match',
+                            'mapping_confidence' => $confidence,
+                            'processed_data' => maybe_serialize(array(
+                                'suggested_matches' => array_slice($matches, 0, 5), // Top 5 suggestions
+                                'confidence_level' => 'close'
+                            ))
+                        ),
+                        array('id' => $supplier->id)
+                    );
+                    $close_matches++;
+                } elseif ($confidence >= 40) {
+                    // Possible match - needs manual review
+                    $wpdb->update(
+                        $wpdb->prefix . 'kt_cigar_supplier_products',
+                        array(
+                            'mapping_status' => 'possible_match',
+                            'mapping_confidence' => $confidence,
+                            'processed_data' => maybe_serialize(array(
+                                'suggested_matches' => array_slice($matches, 0, 10), // Top 10 suggestions
+                                'confidence_level' => 'possible'
+                            ))
+                        ),
+                        array('id' => $supplier->id)
+                    );
+                    $possible_matches++;
+                } else {
+                    // Low confidence - needs manual mapping or new product creation
+                    $wpdb->update(
+                        $wpdb->prefix . 'kt_cigar_supplier_products',
+                        array('mapping_status' => 'needs_review'),
+                        array('id' => $supplier->id)
+                    );
+                    $no_matches++;
+                }
+            } else {
+                // No matches found
+                $wpdb->update(
+                    $wpdb->prefix . 'kt_cigar_supplier_products',
+                    array('mapping_status' => 'no_match'),
+                    array('id' => $supplier->id)
+                );
+                $no_matches++;
+            }
+            
+        } catch (Exception $e) {
+            $this->write_admin_log("Auto-matching error for supplier ID {$supplier->id}: " . $e->getMessage());
+        }
+    }
+
+    $this->write_admin_log("Auto-matching complete: Perfect=$perfect_matches, Close=$close_matches, Possible=$possible_matches, No match=$no_matches");
+
+    wp_send_json_success(array(
+        'perfect_matches' => $perfect_matches,
+        'close_matches' => $close_matches,
+        'possible_matches' => $possible_matches,
+        'no_matches' => $no_matches,
+        'total_processed' => count($supplier_products),
+        'message' => "Intelligent matching complete: $perfect_matches perfect, $close_matches close, $possible_matches possible, $no_matches need review"
+    ));
+}
+public function handle_get_mapping_stats() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    
+    global $wpdb;
+    
+    $stats = $wpdb->get_results("
+        SELECT 
+            mapping_status,
+            COUNT(*) as count,
+            AVG(mapping_confidence) as avg_confidence
+        FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        GROUP BY mapping_status
+        ORDER BY 
+            CASE mapping_status
+                WHEN 'perfect_match' THEN 1
+                WHEN 'close_match' THEN 2  
+                WHEN 'possible_match' THEN 3
+                WHEN 'no_match' THEN 4
+                WHEN 'needs_review' THEN 5
+                ELSE 6
+            END
+    ");
+    
+    wp_send_json_success($stats);
+}
+
+// Additional AJAX handlers for other functionality...
+public function handle_save_master_product() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    global $wpdb;
+    
+    $data = array(
+        'room_id' => intval($_POST['room_id']),
+        'sku' => sanitize_text_field($_POST['sku']),
+        'product_title' => sanitize_textarea_field($_POST['product_title']),
+        'product_category' => sanitize_text_field($_POST['product_category']),
+        'product_type' => sanitize_text_field($_POST['product_type']),
+        'brand' => sanitize_text_field($_POST['brand']),
+        'main_photo' => esc_url_raw($_POST['main_photo']),
+        'multiple_photos' => sanitize_textarea_field($_POST['multiple_photos']),
+        'recommended_retail_price' => floatval($_POST['recommended_retail_price']),
+        'price_sheet_name' => sanitize_text_field($_POST['price_sheet_name']),
+        'excel_sheet_name' => sanitize_text_field($_POST['excel_sheet_name']),
+        'ticket_type' => sanitize_text_field($_POST['ticket_type']),
+        'seats_reference' => sanitize_textarea_field($_POST['seats_reference']),
+        'seat_section' => sanitize_text_field($_POST['seat_section']),
+        'seat_row' => sanitize_text_field($_POST['seat_row']),
+        'seat_number' => sanitize_text_field($_POST['seat_number']),
+        'remark' => sanitize_text_field($_POST['remark']),
+        'is_featured' => intval($_POST['is_featured']),
+        'length_inches' => floatval($_POST['length_inches'])
+    );
+    
+    $product_id = intval($_POST['id'] ?? 0);
+    
+    if ($product_id > 0) {
+        // Update existing
+        $result = $wpdb->update('xwz_master_products', $data, array('id' => $product_id));
+        if ($result !== false) {
+            // Reprocess keywords for updated product
+            $this->process_single_master_product($product_id);
+            wp_send_json_success('Master product updated successfully');
+        } else {
+            wp_send_json_error('Failed to update master product: ' . $wpdb->last_error);
+        }
+    } else {
+        // Insert new
+        $result = $wpdb->insert('xwz_master_products', $data);
+        if ($result) {
+            $new_id = $wpdb->insert_id;
+            // Process keywords for new product
+            $this->process_single_master_product($new_id);
+            wp_send_json_success('Master product created successfully');
+        } else {
+            wp_send_json_error('Failed to create master product: ' . $wpdb->last_error);
+        }
+    }
+}
+ public function handle_search_master_products() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       $search = sanitize_text_field($_GET['search'] ?? '');
+       $page = intval($_GET['page'] ?? 1);
+       $per_page = intval($_GET['per_page'] ?? 50);
+       
+       ob_start();
+       $this->render_master_products_table($search, $page, $per_page);
+       $html = ob_get_clean();
+       
+       wp_send_json_success(array('html' => $html));
+ }
+
+ public function handle_delete_master_product() {
+     check_ajax_referer('kt_cigar_nonce', 'nonce');
+       if (!current_user_can('manage_options')) {
+           wp_die('Insufficient permissions');
+       }
+       
+       global $wpdb;
+       
+       $product_id = intval($_POST['product_id']);
+       
+       // Delete associated mappings first
+       $wpdb->delete($wpdb->prefix . 'kt_cigar_product_mappings', array('master_product_id' => $product_id));
+       
+       // Delete master product
+       $result = $wpdb->delete('xwz_master_products', array('id' => $product_id));
+       
+       if ($result) {
+           wp_send_json_success('Master product deleted successfully');
+       } else {
+           wp_send_json_error('Failed to delete master product');
+       }
+ 
+ }
+	
+public function handle_analyze_single_match() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $supplier_id = intval($_POST['supplier_id']);
+    $master_id = intval($_POST['master_id']);
+    
+    global $wpdb;
+    
+    error_log("Analyzing match: Supplier ID = $supplier_id, Master ID = $master_id");
+    
+    // Get supplier product
+    $supplier = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}kt_cigar_supplier_products 
+        WHERE id = %d
+    ", $supplier_id), ARRAY_A);
+    
+    // Get master product
+    $master = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM {$wpdb->prefix}master_products 
+        WHERE id = %d
+    ", $master_id), ARRAY_A);
+    
+    if (!$supplier) {
+        wp_send_json_error("Supplier product not found (ID: $supplier_id)");
+        return;
+    }
+    
+    if (!$master) {
+        wp_send_json_error("Master product not found (ID: $master_id)");
+        return;
+    }
+    
+    // SAFE keyword parsing
+    $supplier_keywords = array();
+    $master_keywords = array();
+    
+    if (!empty($supplier['extracted_keywords'])) {
+        $unserialized = maybe_unserialize($supplier['extracted_keywords']);
+        if (is_array($unserialized)) {
+            $supplier_keywords = $unserialized;
+        }
+    }
+    
+    if (!empty($master['extracted_keywords'])) {
+        $unserialized = maybe_unserialize($master['extracted_keywords']);
+        if (is_array($unserialized)) {
+            $master_keywords = $unserialized;
+        }
+    }
+    
+    // Group keywords by type
+    $supplier_grouped = $this->group_keywords_by_type($supplier_keywords);
+    $master_grouped = $this->group_keywords_by_type($master_keywords);
+    
+    // Ensure we're sending arrays, not strings
+    wp_send_json_success(array(
+        'supplier' => array(
+            'id' => $supplier['id'],
+            'title' => $supplier['supplier_title'] ?: 'No Title',
+            'brand' => $supplier['supplier_brand'] ?: 'N/A',
+            'ring' => $supplier['seat_row'] ?: 'N/A',
+            'length' => $supplier['seat_number'] ?: 'N/A',
+            'raw_keywords' => is_array($supplier_keywords) ? $supplier_keywords : array(), // ENSURE ARRAY
+            'grouped_keywords' => $supplier_grouped,
+            'keyword_count' => count($supplier_keywords)
+        ),
+        'master' => array(
+            'id' => $master['id'],
+            'title' => $master['product_title'] ?: 'No Title',
+            'brand' => $master['brand'] ?: 'N/A',
+            'ring' => $master['seat_row'] ?: 'N/A',
+            'length' => $master['seat_number'] ?: 'N/A',
+            'raw_keywords' => is_array($master_keywords) ? $master_keywords : array(), // ENSURE ARRAY
+            'grouped_keywords' => $master_grouped,
+            'keyword_count' => count($master_keywords)
+        ),
+        'comparison' => $this->compare_products_detailed($supplier_grouped, $master_grouped)
+    ));
+}
+
+private function group_keywords_by_type($keywords) {
+    $grouped = array();
+    
+    if (!is_array($keywords)) {
+        return $grouped;
+    }
+    
+    foreach ($keywords as $keyword) {
+        if (strpos($keyword, ':') !== false) {
+            list($type, $value) = explode(':', $keyword, 2);
+            $grouped[$type][] = $value;
+        } else {
+            $grouped['OTHER'][] = $keyword;
+        }
+    }
+    
+    return $grouped;
+}
+
+private function compare_products_detailed($supplier_grouped, $master_grouped) {
+    $comparison = array();
+    
+    // Get all unique keyword types
+    $all_types = array_unique(array_merge(array_keys($supplier_grouped), array_keys($master_grouped)));
+    
+    foreach ($all_types as $type) {
+        $supplier_values = $supplier_grouped[$type] ?? array();
+        $master_values = $master_grouped[$type] ?? array();
+        
+        $comparison[$type] = array(
+            'supplier' => $supplier_values,
+            'master' => $master_values,
+            'match_status' => $this->get_match_status($supplier_values, $master_values, $type)
+        );
+    }
+    
+    return $comparison;
+}
+
+private function get_match_status($supplier_values, $master_values, $type) {
+    if (empty($supplier_values) && empty($master_values)) {
+        return 'both_empty';
+    } elseif (empty($supplier_values)) {
+        return 'supplier_missing';
+    } elseif (empty($master_values)) {
+        return 'master_missing';
+    }
+    
+    // Check for exact matches
+    $matches = array_intersect($supplier_values, $master_values);
+    if (!empty($matches)) {
+        return 'exact_match';
+    }
+    
+    // Check for fuzzy matches (for text types)
+    if (in_array($type, array('BRAND', 'VITOLA', 'SERIES', 'MODEL'))) {
+        foreach ($supplier_values as $s_val) {
+            foreach ($master_values as $m_val) {
+                $similarity = 0;
+                similar_text(strtolower($s_val), strtolower($m_val), $similarity);
+                if ($similarity >= 70) {
+                    return 'fuzzy_match';
+                }
+            }
+        }
+    }
+    
+    // Check for numeric matches (for dimensions)
+    if (in_array($type, array('RING', 'LENGTH'))) {
+        foreach ($supplier_values as $s_val) {
+            foreach ($master_values as $m_val) {
+                $s_num = floatval($s_val);
+                $m_num = floatval($m_val);
+                if (abs($s_num - $m_num) <= ($s_num * 0.05)) { // 5% tolerance
+                    return 'numeric_match';
+                }
+            }
+        }
+    }
+    
+    return 'no_match';
+}	
+
+	public function handle_get_master_product() {
+    check_ajax_referer('kt_cigar_nonce', 'nonce');
+    if (!current_user_can('manage_options')) {
+        wp_die('Insufficient permissions');
+    }
+    
+    $product_id = intval($_POST['product_id']);
+    
+    global $wpdb;
+    $product = $wpdb->get_row($wpdb->prepare("
+        SELECT * FROM xwz_master_products 
+        WHERE id = %d
+    ", $product_id), ARRAY_A);
+    
+    if ($product) {
+        wp_send_json_success($product);
+    } else {
+        wp_send_json_error('Product not found');
+    }
+}
+	
+
+
+public function enqueue_admin_scripts($hook) {
+    if (strpos($hook, 'kt-cigar-matcher') === false) {
+        return;
+    }
+    
+    // Simple jQuery loading
+    wp_enqueue_script('jquery');
+	 // Ensure jQuery loads in the head, not footer
+wp_enqueue_script('jquery');
+wp_script_add_data('jquery', 'group', 0);
+
+// Add dependency management
+wp_enqueue_script('kt-cigar-admin-js', '', array('jquery'), '1.0.0', false);
+    
+    // Add a small inline script to ensure jQuery is ready
+    wp_add_inline_script('jquery', '
+        if (typeof jQuery === "undefined") {
+            console.error("jQuery failed to load!");
+        } else {
+            console.log("jQuery loaded successfully");
+        }
+    ');
+    
+    // Add AJAX variables
+    wp_localize_script('jquery', 'ktCigarAjax', array(
+        'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce' => wp_create_nonce('kt_cigar_nonce'),
+        'strings' => array(
+            'confirm_delete' => 'Are you sure you want to delete this product?'
+        )
+    ));
+}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * KT Cigar Data File Helper - Enhanced term extraction
+ * Integrated into main plugin file for cigar keyword processing
+ */
+class KT_Cigar_Data_Helper {
+    
+    /**
+     * Get enhanced Chinese vitola mapping
+     */
+    public static function get_chinese_vitola($chinese_term) {
+        $data_file_path = WP_CONTENT_DIR . '/cigar-mappings-data.php';
+        if (file_exists($data_file_path)) {
+            $cigar_data = include($data_file_path);
+            if (isset($cigar_data['chinese_vitola_mappings'][$chinese_term])) {
+                return $cigar_data['chinese_vitola_mappings'][$chinese_term];
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Clean text using enhanced rules
+     */
+    public static function clean_text_enhanced($text) {
+        // Remove common Chinese description patterns
+        $patterns = array(
+            '/品牌[：:]\s*[\p{Han}]+/u',    // Remove "品牌: xxx"
+            '/型号[：:]\s*[\p{Han}]+/u',    // Remove "型号: xxx" 
+            '/英文名称[：:][^品]*/u',        // Remove "英文名称: xxx"
+            '/品型[：:].*?环径/u',          // Remove "品型:xxx 环径"
+            '/环径[：:]\s*\d+/u',          // Remove standalone "环径: 56"
+            '/长度[：:]\s*\d+/u'           // Remove standalone "长度: 150"
+        );
+        
+        foreach ($patterns as $pattern) {
+            $text = preg_replace($pattern, '', $text);
+        }
+        
+        // Normalize spaces and brackets
+        $text = preg_replace('/\s+/', ' ', $text);
+        $text = preg_replace('/[（(]\s*([^)）]*)\s*[)）]/', '($1)', $text);
+        
+        return trim($text);
+    }
+    
+    /**
+     * Validate extraction against rules
+     */
+    public static function validate_extraction($type, $value) {
+        switch ($type) {
+            case 'ring_gauge':
+                return ($value >= 20 && $value <= 80);
+                
+            case 'length':
+                return ($value >= 80 && $value <= 250);
+                
+            case 'count':
+                return ($value >= 1 && $value <= 1000);
+                
+            case 'year':
+                return ($value >= 1990 && $value <= date('Y') + 2);
+                
+            default:
+                return true;
+        }
+    }
+    
+    /**
+     * Check if text contains aluminum tube indicators
+     */
+    public static function is_aluminum_tube($text) {
+        $tube_indicators = array('铝管', '铝筒', 'aluminum tube', 'a/t', 'A/T', 'tubos');
+        
+        foreach ($tube_indicators as $indicator) {
+            if (mb_stripos($text, $indicator) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /**
+     * Enhanced packaging detection
+     */
+    public static function identify_packaging_type($text) {
+        $packaging_patterns = array(
+            'aluminum_tubes' => array('铝管', '铝筒', 'aluminum tube', 'a/t', 'A/T', 'tubos'),
+            'box' => array('盒', '盒装', '木盒', '礼盒', 'box', 'wooden box'),
+            'bundle' => array('条', '捆', '束', 'bundle'),
+            'pack' => array('包', '包装', 'pack', 'package'),
+            'case' => array('箱', '大箱', 'case')
+        );
+        
+        foreach ($packaging_patterns as $type => $patterns) {
+            foreach ($patterns as $pattern) {
+                if (mb_stripos($text, $pattern) !== false) {
+                    return $type;
+                }
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Extract enhanced Chinese model patterns
+     */
+    public static function extract_chinese_model($text) {
+        // Model number patterns
+        if (preg_match('/(No\.?\s*\d+|\d+号|第\d+)/u', $text, $matches)) {
+            return array(
+                'type' => 'model_number',
+                'value' => $matches[1]
+            );
+        }
+        
+        // Chinese model with size indicator "天才(大)"
+        if (preg_match('/([\p{Han}]{1,4})\s*[（\(]([大中小特迷超])[）\)]/u', $text, $matches)) {
+            return array(
+                'type' => 'chinese_with_size',
+                'value' => $matches[1],
+                'size' => $matches[2]
+            );
+        }
+        
+        return null;
+ 
+
+
+		
+	}
+	public static function convert_length_to_inches($length_value, $source_text = '') {
+    if (empty($length_value)) {
+        return null;
+    }
+    
+    $length = floatval($length_value);
+    
+    // If value is already in reasonable inch range (3-12 inches)
+    if ($length >= 3 && $length <= 12) {
+        return round($length, 1);
+    }
+    
+    // If value is in mm range (80-250mm), convert to inches
+    if ($length >= 80 && $length <= 250) {
+        return round($length / 25.4, 1);
+    }
+    
+    // Default: assume mm if > 20, inches if <= 20
+    if ($length > 20) {
+        return round($length / 25.4, 1);
+    }
+    
+    return round($length, 1);
+}
+	
+	
+	
+
+	
+	
+	
+	
+	
+}
+
+
+
+
+
+
+
+
+// Initialize the admin class
+KT_Cigar_Matcher_Admin::get_instance();
