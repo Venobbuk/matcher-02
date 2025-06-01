@@ -230,34 +230,11 @@ private static function brands_match_intelligent($brand1, $brand2) {
         return false;
     }
     
-    // CRITICAL: DO NOT remove country indicators!
-    // The datafile properly separates 'cohiba dominican' vs 'cohiba' (Cuban)
-    // The datafile properly separates 'montecristo nicaragua' vs 'montecristo' (Cuban)
-    // These distinctions are important for accurate matching
+    // STRICT: Only exact matches allowed to prevent cross-brand pollution
+    return self::brands_match_exact($brand1, $brand2);
     
-    // First try exact match to preserve datafile distinctions
-    if (self::brands_match_exact($brand1, $brand2)) {
-        return true;
-    }
-    
-    // Second try flexible match but still preserve important distinctions
-    $b1_lower = mb_strtolower(trim($brand1), 'UTF-8');
-    $b2_lower = mb_strtolower(trim($brand2), 'UTF-8');
-    
-    // Clean only punctuation, preserve all words including country indicators
-    $b1_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b1_lower);
-    $b1_clean = preg_replace('/\s+/', ' ', trim($b1_clean));
-    
-    $b2_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b2_lower);
-    $b2_clean = preg_replace('/\s+/', ' ', trim($b2_clean));
-    
-    // If they match after basic cleaning, that's good
-    if ($b1_clean === $b2_clean) {
-        return true;
-    }
-    
-    // For partial matching, be very strict to avoid wrong brand mappings
-    // Only allow if one completely contains the other AND coverage is high
+   // REMOVED: No flexible matching to prevent incorrect brand associations
+    return false;
     $b1_len = mb_strlen($b1_clean, 'UTF-8');
     $b2_len = mb_strlen($b2_clean, 'UTF-8');
     
@@ -359,12 +336,13 @@ private static function brands_match_intelligent($brand1, $brand2) {
         if (empty($supplier_values) || empty($master_values)) {
     // CRITICAL: Zero tolerance for missing critical differentiators
     switch ($keyword_type) {
-        case 'SERIES':
+       case 'SERIES':
         case 'MODEL': 
         case 'YEAR':
+        case 'VITOLA':
             return 0.0; // ZERO score - these MUST match
         default:
-            return 0.2; // Small penalty for other missing data
+            return 0.1; // Smaller penalty for other missing data
     }
 }
         
@@ -535,7 +513,17 @@ private static function compare_model_values($val1, $val2) {
     $v1 = strtoupper(trim($val1));
     $v2 = strtoupper(trim($val2));
     
-    return ($v1 === $v2) ? 1.0 : 0.0; // Only exact matches
+   // Handle common series equivalencies but be strict
+    if ($v1 === $v2) {
+        return 1.0;
+    }
+    
+    // Allow number-only series matches (2 = #2 = No.2)
+    if (is_numeric($v1) && is_numeric($v2) && intval($v1) === intval($v2)) {
+        return 1.0;
+    }
+    
+    return 0.0; // No other partial matches
 }
 
 /**
