@@ -554,257 +554,280 @@ private function get_master_processing_stats() {
       
       <?php $this->render_modals(); ?>
 
- <!-- ADD THE SCRIPT HERE -->
-    <script>
-   window.enableInlineEdit = function(productId, field) {
-    const span = document.querySelector(`#master-${field}-${productId} span`);
-    const currentValue = span.textContent.trim();
+ <script>
+// FIXED: Wrap ALL JavaScript in jQuery document ready
+jQuery(document).ready(function($) {
+    console.log("Document ready - initializing KT Cigar Matcher");
     
-    // Create input field
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = currentValue;
-    input.style.width = '100%';
-    input.style.fontSize = '12px';
-    
-    // Replace span with input
-    span.parentNode.replaceChild(input, span);
-    input.focus();
-    input.select();
-    
-    // Save on Enter or blur
-    function saveEdit() {
-        const newValue = input.value.trim();
-        
-        jQuery.post(ktCigarAjax.ajax_url, {
-            action: 'kt_inline_edit_master',
-            nonce: ktCigarAjax.nonce,
-            product_id: productId,
-            field: field,
-            value: newValue
-        }, function(response) {
-            if (response.success) {
-                const newSpan = document.createElement('span');
-                newSpan.onclick = function() { enableInlineEdit(productId, field); };
-                newSpan.style.cursor = 'pointer';
-                newSpan.style.borderBottom = '1px dotted #999';
-                newSpan.textContent = newValue;
-                
-                input.parentNode.replaceChild(newSpan, input);
-            } else {
-                alert('Failed to update: ' + (response.data || 'Unknown error'));
-            }
-        });
+    // Verify ktCigarAjax is available
+    if (typeof ktCigarAjax === 'undefined') {
+        console.error('ktCigarAjax not available - check script loading');
+        return;
     }
     
-    input.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            saveEdit();
-        }
+    console.log("ktCigarAjax available:", ktCigarAjax);
+    
+    // Tab functionality
+    $('.nav-tab').on('click', function(e) {
+        e.preventDefault();
+        
+        var tab = $(this).data('tab');
+        console.log('Tab clicked:', tab);
+        
+        // Update active tab
+        $('.nav-tab').removeClass('nav-tab-active');
+        $(this).addClass('nav-tab-active');
+        
+        // Show/hide content
+        $('.tab-content').removeClass('active');
+        $('#' + tab + '-tab').addClass('active');
     });
     
-    input.addEventListener('blur', saveEdit);
-};
-	function enableInlineEditDropdown(productId, field, options) {
-    const span = document.querySelector(`#master-${field}-${productId} span`);
-    const currentValue = span.getAttribute('data-value') || (span.textContent.trim() === 'Yes' ? '1' : '0');
+    console.log("KT Cigar Matcher admin interface initialized");
     
-    const select = document.createElement('select');
-    select.style.width = '100%';
-    
-    for (const [value, text] of Object.entries(options)) {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = text;
-        if (value === currentValue) option.selected = true;
-        select.appendChild(option);
-    }
-    
-    span.parentNode.replaceChild(select, span);
-    select.focus();
-    
-    function saveEdit() {
-        const newValue = select.value;
-        const newText = options[newValue];
+    // Make functions globally available for onclick handlers
+    window.enableInlineEdit = function(productId, field) {
+        const span = document.querySelector(`#master-${field}-${productId} span`);
+        const currentValue = span.textContent.trim();
         
-        jQuery.post(ktCigarAjax.ajax_url, {
-            action: 'kt_inline_edit_master',
-            nonce: ktCigarAjax.nonce,
-            product_id: productId,
-            field: field,
-            value: newValue
-        }, function(response) {
-            if (response.success) {
-                const newSpan = document.createElement('span');
-                newSpan.onclick = function() { enableInlineEditDropdown(productId, field, options); };
-                newSpan.style.cursor = 'pointer';
-                newSpan.style.borderBottom = '1px dotted #999';
-                newSpan.setAttribute('data-value', newValue);
-                newSpan.innerHTML = '<small>' + newText + '</small>';
-                
-                select.parentNode.replaceChild(newSpan, select);
-            } else {
-                alert('Failed to update: ' + (response.data || 'Unknown error'));
-            }
-        });
-    }
-    
-    select.addEventListener('change', saveEdit);
-    select.addEventListener('blur', saveEdit);
-}
-
-function enableInlineEditTextarea(productId, field) {
-    const span = document.querySelector(`#master-${field}-${productId} span`);
-    const currentValue = span.textContent.trim();
-    
-    const textarea = document.createElement('textarea');
-    textarea.value = currentValue;
-    textarea.style.width = '100%';
-    textarea.style.height = '80px';
-    textarea.style.fontSize = '11px';
-    
-    span.parentNode.replaceChild(textarea, span);
-    textarea.focus();
-    
-    function saveEdit() {
-        const newValue = textarea.value.trim();
+        // Create input field
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentValue;
+        input.style.width = '100%';
+        input.style.fontSize = '12px';
         
-        jQuery.post(ktCigarAjax.ajax_url, {
-            action: 'kt_inline_edit_master',
-            nonce: ktCigarAjax.nonce,
-            product_id: productId,
-            field: field,
-            value: newValue
-        }, function(response) {
-            if (response.success) {
-                const newSpan = document.createElement('span');
-                newSpan.onclick = function() { enableInlineEditTextarea(productId, field); };
-                newSpan.style.cursor = 'pointer';
-                newSpan.style.borderBottom = '1px dotted #999';
-                newSpan.innerHTML = '<div style="font-size: 11px; max-height: 60px; overflow: hidden;">' + 
-                    newValue.substring(0, 100) + (newValue.length > 100 ? '...' : '') + '</div>';
-                
-                textarea.parentNode.replaceChild(newSpan, textarea);
-            } else {
-                alert('Failed to update: ' + (response.data || 'Unknown error'));
-            }
-        });
-    }
-    
-    textarea.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter' && e.ctrlKey) {
-            saveEdit();
+        // Replace span with input
+        span.parentNode.replaceChild(input, span);
+        input.focus();
+        input.select();
+        
+        // Save on Enter or blur
+        function saveEdit() {
+            const newValue = input.value.trim();
+            
+            $.post(ktCigarAjax.ajax_url, {
+                action: 'kt_inline_edit_master',
+                nonce: ktCigarAjax.nonce,
+                product_id: productId,
+                field: field,
+                value: newValue
+            }, function(response) {
+                if (response.success) {
+                    const newSpan = document.createElement('span');
+                    newSpan.onclick = function() { enableInlineEdit(productId, field); };
+                    newSpan.style.cursor = 'pointer';
+                    newSpan.style.borderBottom = '1px dotted #999';
+                    newSpan.textContent = newValue;
+                    
+                    input.parentNode.replaceChild(newSpan, input);
+                } else {
+                    alert('Failed to update: ' + (response.data || 'Unknown error'));
+                }
+            }).fail(function() {
+                alert('Network error - please try again');
+            });
         }
-    });
-    
-    textarea.addEventListener('blur', saveEdit);
-}	
-		
-function closeProductModal() {
-    document.getElementById('product-modal').style.display = 'none';
-}
+        
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                saveEdit();
+            }
+        });
+        
+        input.addEventListener('blur', saveEdit);
+    };
 
-function updateImagePreview() {
-    const url = document.getElementById('main-photo-url').value;
-    const img = document.getElementById('main-photo-thumb');
-    const placeholder = document.getElementById('main-photo-placeholder');
-    
-    if (url) {
-        img.src = url;
-        img.style.display = 'block';
-        placeholder.style.display = 'none';
-        img.onerror = function() {
+    window.enableInlineEditDropdown = function(productId, field, options) {
+        const span = document.querySelector(`#master-${field}-${productId} span`);
+        const currentValue = span.getAttribute('data-value') || (span.textContent.trim() === 'Yes' ? '1' : '0');
+        
+        const select = document.createElement('select');
+        select.style.width = '100%';
+        
+        for (const [value, text] of Object.entries(options)) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = text;
+            if (value === currentValue) option.selected = true;
+            select.appendChild(option);
+        }
+        
+        span.parentNode.replaceChild(select, span);
+        select.focus();
+        
+        function saveEdit() {
+            const newValue = select.value;
+            const newText = options[newValue];
+            
+            $.post(ktCigarAjax.ajax_url, {
+                action: 'kt_inline_edit_master',
+                nonce: ktCigarAjax.nonce,
+                product_id: productId,
+                field: field,
+                value: newValue
+            }, function(response) {
+                if (response.success) {
+                    const newSpan = document.createElement('span');
+                    newSpan.onclick = function() { enableInlineEditDropdown(productId, field, options); };
+                    newSpan.style.cursor = 'pointer';
+                    newSpan.style.borderBottom = '1px dotted #999';
+                    newSpan.setAttribute('data-value', newValue);
+                    newSpan.innerHTML = '<small>' + newText + '</small>';
+                    
+                    select.parentNode.replaceChild(newSpan, select);
+                } else {
+                    alert('Failed to update: ' + (response.data || 'Unknown error'));
+                }
+            }).fail(function() {
+                alert('Network error - please try again');
+            });
+        }
+        
+        select.addEventListener('change', saveEdit);
+        select.addEventListener('blur', saveEdit);
+    };
+
+    window.enableInlineEditTextarea = function(productId, field) {
+        const span = document.querySelector(`#master-${field}-${productId} span`);
+        const currentValue = span.textContent.trim();
+        
+        const textarea = document.createElement('textarea');
+        textarea.value = currentValue;
+        textarea.style.width = '100%';
+        textarea.style.height = '80px';
+        textarea.style.fontSize = '11px';
+        
+        span.parentNode.replaceChild(textarea, span);
+        textarea.focus();
+        
+        function saveEdit() {
+            const newValue = textarea.value.trim();
+            
+            $.post(ktCigarAjax.ajax_url, {
+                action: 'kt_inline_edit_master',
+                nonce: ktCigarAjax.nonce,
+                product_id: productId,
+                field: field,
+                value: newValue
+            }, function(response) {
+                if (response.success) {
+                    const newSpan = document.createElement('span');
+                    newSpan.onclick = function() { enableInlineEditTextarea(productId, field); };
+                    newSpan.style.cursor = 'pointer';
+                    newSpan.style.borderBottom = '1px dotted #999';
+                    newSpan.innerHTML = '<div style="font-size: 11px; max-height: 60px; overflow: hidden;">' + 
+                        newValue.substring(0, 100) + (newValue.length > 100 ? '...' : '') + '</div>';
+                    
+                    textarea.parentNode.replaceChild(newSpan, textarea);
+                } else {
+                    alert('Failed to update: ' + (response.data || 'Unknown error'));
+                }
+            }).fail(function() {
+                alert('Network error - please try again');
+            });
+        }
+        
+        textarea.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                saveEdit();
+            }
+        });
+        
+        textarea.addEventListener('blur', saveEdit);
+    };
+
+    // Additional functions (keep your existing functions but wrap them properly)
+    window.closeProductModal = function() {
+        document.getElementById('product-modal').style.display = 'none';
+    };
+
+    window.updateImagePreview = function() {
+        const url = document.getElementById('main-photo-url').value;
+        const img = document.getElementById('main-photo-thumb');
+        const placeholder = document.getElementById('main-photo-placeholder');
+        
+        if (url) {
+            img.src = url;
+            img.style.display = 'block';
+            placeholder.style.display = 'none';
+            img.onerror = function() {
+                img.style.display = 'none';
+                placeholder.style.display = 'flex';
+                placeholder.textContent = 'Failed to load image';
+            };
+        } else {
             img.style.display = 'none';
             placeholder.style.display = 'flex';
-            placeholder.textContent = 'Failed to load image';
-        };
-    } else {
-        img.style.display = 'none';
-        placeholder.style.display = 'flex';
-        placeholder.textContent = 'No image selected';
-    }
-}
-
-function clearMainPhoto() {
-    document.getElementById('main-photo-url').value = '';
-    updateImagePreview();
-}
-
-function editMasterProduct(productId) {
-    jQuery.post(ktCigarAjax.ajax_url, {
-        action: 'kt_get_master_product',
-        nonce: ktCigarAjax.nonce,
-        product_id: productId
-    }, function(response) {
-        if (response.success) {
-            const product = response.data;
-            
-            document.getElementById('product-id').value = product.id;
-            document.getElementById('product-room-id').value = product.room_id || '';
-            document.getElementById('product-sku').value = product.sku || '';
-            document.getElementById('product-title').value = product.product_title || '';
-            document.getElementById('product-category').value = product.product_category || '';
-            document.getElementById('product-brand').value = product.brand || '';
-            document.getElementById('product-price').value = product.recommended_retail_price || '';
-            document.getElementById('product-seat-row').value = product.seat_row || '';
-            document.getElementById('product-seat-number').value = product.seat_number || '';
-            document.getElementById('seats-reference').value = product.seats_reference || '';
-            document.getElementById('product-featured').value = product.is_featured || '0';
-            // Load main photo
-const mainPhotoUrl = product.main_photo || '';
-document.getElementById('main-photo-url').value = mainPhotoUrl;
-updateImagePreview();
-            document.getElementById('product-modal').style.display = 'block';
-            document.getElementById('modal-title').textContent = 'Edit Master Product';
+            placeholder.textContent = 'No image selected';
         }
-    });
-}
+    };
 
-function openProductModal() {
-    document.getElementById('product-form').reset();
-    document.getElementById('product-id').value = '';
-    document.getElementById('modal-title').textContent = 'Add New Master Product';
-    document.getElementById('product-modal').style.display = 'block';
-}	
-function updateImagePreview() {
-    const url = document.getElementById('main-photo-url').value;
-    const img = document.getElementById('main-photo-thumb');
-    const placeholder = document.getElementById('main-photo-placeholder');
-    
-    if (url) {
-        img.src = url;
-        img.style.display = 'block';
-        placeholder.style.display = 'none';
-    } else {
-        img.style.display = 'none';
-        placeholder.style.display = 'flex';
-    }
-}
+    window.clearMainPhoto = function() {
+        document.getElementById('main-photo-url').value = '';
+        updateImagePreview();
+    };
 
-function clearMainPhoto() {
-    document.getElementById('main-photo-url').value = '';
-    updateImagePreview();
-}
-// Handle form submission
-jQuery('#product-form').on('submit', function(e) {
-    e.preventDefault();
-    
-    const formData = new FormData(this);
-    formData.append('action', 'kt_save_master_product');
-    formData.append('nonce', ktCigarAjax.nonce);
-    
-    jQuery.post(ktCigarAjax.ajax_url, jQuery('#product-form').serialize() + '&action=kt_save_master_product&nonce=' + ktCigarAjax.nonce, function(response) {
-        if (response.success) {
-            alert('Product saved successfully!');
-            closeProductModal();
-            location.reload(); // Refresh the page to see changes
-        } else {
-            alert('Error: ' + (response.data || 'Unknown error'));
-        }
+    window.editMasterProduct = function(productId) {
+        $.post(ktCigarAjax.ajax_url, {
+            action: 'kt_get_master_product',
+            nonce: ktCigarAjax.nonce,
+            product_id: productId
+        }, function(response) {
+            if (response.success) {
+                const product = response.data;
+                
+                document.getElementById('product-id').value = product.id;
+                document.getElementById('product-room-id').value = product.room_id || '';
+                document.getElementById('product-sku').value = product.sku || '';
+                document.getElementById('product-title').value = product.product_title || '';
+                document.getElementById('product-category').value = product.product_category || '';
+                document.getElementById('product-brand').value = product.brand || '';
+                document.getElementById('product-price').value = product.recommended_retail_price || '';
+                document.getElementById('product-seat-row').value = product.seat_row || '';
+                document.getElementById('product-seat-number').value = product.seat_number || '';
+                document.getElementById('seats-reference').value = product.seats_reference || '';
+                document.getElementById('product-featured').value = product.is_featured || '0';
+                
+                const mainPhotoUrl = product.main_photo || '';
+                document.getElementById('main-photo-url').value = mainPhotoUrl;
+                updateImagePreview();
+                
+                document.getElementById('product-modal').style.display = 'block';
+                document.getElementById('modal-title').textContent = 'Edit Master Product';
+            }
+        }).fail(function() {
+            alert('Failed to load product data');
+        });
+    };
+
+    window.openProductModal = function() {
+        document.getElementById('product-form').reset();
+        document.getElementById('product-id').value = '';
+        document.getElementById('modal-title').textContent = 'Add New Master Product';
+        document.getElementById('product-modal').style.display = 'block';
+    };
+
+    // Handle form submission
+    $('#product-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        $.post(ktCigarAjax.ajax_url, $(this).serialize() + '&action=kt_save_master_product&nonce=' + ktCigarAjax.nonce, function(response) {
+            if (response.success) {
+                alert('Product saved successfully!');
+                closeProductModal();
+                location.reload();
+            } else {
+                alert('Error: ' + (response.data || 'Unknown error'));
+            }
+        }).fail(function() {
+            alert('Network error - please try again');
+        });
     });
-});		
-		
-    </script>
+    
+    console.log("All functions initialized successfully");
+});
+</script>
 
 
 
@@ -3997,26 +4020,20 @@ public function enqueue_admin_scripts($hook) {
         return;
     }
     
-    // Simple jQuery loading
+    // FIXED: Proper jQuery loading sequence
     wp_enqueue_script('jquery');
-	 // Ensure jQuery loads in the head, not footer
-wp_enqueue_script('jquery');
-wp_script_add_data('jquery', 'group', 0);
-
-// Add dependency management
-wp_enqueue_script('kt-cigar-admin-js', '', array('jquery'), '1.0.0', false);
     
-    // Add a small inline script to ensure jQuery is ready
-    wp_add_inline_script('jquery', '
-        if (typeof jQuery === "undefined") {
-            console.error("jQuery failed to load!");
-        } else {
-            console.log("jQuery loaded successfully");
-        }
-    ');
+    // Create a dedicated admin script
+    wp_enqueue_script(
+        'kt-cigar-admin',
+        false,  // No external file, just for dependency
+        array('jquery'),
+        KT_CIGAR_VERSION,
+        false  // Load in head, not footer
+    );
     
-    // Add AJAX variables
-    wp_localize_script('jquery', 'ktCigarAjax', array(
+    // Add AJAX variables AFTER jQuery is confirmed to load
+    wp_localize_script('kt-cigar-admin', 'ktCigarAjax', array(
         'ajax_url' => admin_url('admin-ajax.php'),
         'nonce' => wp_create_nonce('kt_cigar_nonce'),
         'strings' => array(
