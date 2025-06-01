@@ -1,0 +1,729 @@
+/* THIS IS THE ID AND NAME (634) brand match fuzzy */
+
+/**
+ * KT Cigar Intelligent Keyword-Based Matching System
+ * Uses extracted keywords from both supplier and master products for intelligent matching
+ * Prioritizes: Brand > Vitola > Series > Dimensions > Count > Special Features
+ */
+
+if (!defined("ABSPATH")) {
+    exit;
+}
+
+class KT_Cigar_Brand_Matcher {
+    
+    private static $debug_enabled = true;
+    
+    /**
+     * Main matching function - Keyword-based intelligent matching
+     */
+   public static function match_products_by_brand($supplier_title, $supplier_brand, $internal_products, $threshold = 0.80) {
+        self::write_brand_log("=== INTELLIGENT KEYWORD MATCHING START ===");
+        self::write_brand_log("Supplier: '$supplier_title'");
+        self::write_brand_log("Total internal products: " . count($internal_products));
+        
+        // Step 1: Get supplier product from database (it should have extracted keywords)
+        $supplier_product = self::find_supplier_product_by_title($supplier_title);
+        if (!$supplier_product) {
+            self::write_brand_log("ERROR: Could not find supplier product in database");
+            return array();
+        }
+        
+        // Step 2: Parse supplier keywords
+        $supplier_keywords = self::parse_keywords($supplier_product['extracted_keywords']);
+        if (empty($supplier_keywords)) {
+            self::write_brand_log("ERROR: No keywords found for supplier product");
+            return array();
+        }
+        
+        self::write_brand_log("Supplier keywords: " . json_encode($supplier_keywords, JSON_UNESCAPED_UNICODE));
+        
+        // Step 3: Extract supplier brand from keywords
+        $supplier_brand_keyword = self::get_keyword_value($supplier_keywords, 'BRAND');
+        if (!$supplier_brand_keyword) {
+            self::write_brand_log("ERROR: No BRAND keyword found in supplier product");
+            return array();
+        }
+        
+        self::write_brand_log("Supplier brand from keywords: '$supplier_brand_keyword'");
+        
+        // Step 4: Filter master products by matching brand
+        $brand_filtered_products = self::filter_by_brand_keyword($internal_products, $supplier_brand_keyword);
+        self::write_brand_log("Brand filtering found " . count($brand_filtered_products) . " matching products");
+        
+        if (empty($brand_filtered_products)) {
+            // Try fuzzy brand matching if exact fails
+            $brand_filtered_products = self::fuzzy_filter_by_brand($internal_products, $supplier_brand_keyword);
+            self::write_brand_log("Fuzzy brand filtering found " . count($brand_filtered_products) . " matching products");
+        }
+        
+        if (empty($brand_filtered_products)) {
+            self::write_brand_log("No brand matches found");
+            return array();
+        }
+        
+        // Step 5: Intelligent keyword-based matching within same brand
+        $matches = array();
+        foreach ($brand_filtered_products as $master_product) {
+            $master_keywords = self::parse_keywords($master_product['extracted_keywords']);
+            
+            if (empty($master_keywords)) {
+                continue;
+            }
+            
+          $match_score = self::calculate_keyword_similarity($supplier_keywords, $master_keywords);
+            
+if ($match_score >= $threshold) {
+    $matches[] = array(
+        'internal_product' => $master_product,
+        'score' => round($match_score * 100, 1),
+        'method' => 'intelligent_keyword_matching',
+        'match_details' => self::get_keyword_match_details($supplier_keywords, $master_keywords, $match_score),
+        'master_id' => $master_product['id'],
+        'master_sku' => $master_product['sku'] ?? '',
+        'master_title' => $master_product['product_title'] ?? ''
+    );
+    
+    self::write_brand_log("KEYWORD MATCH: " . ($master_product['product_title'] ?? '') . " | Score: " . round($match_score * 100, 1) . "%");
+}
+		}    
+        // Step 6: If keyword matching yields few results, try title fuzzy matching as backup
+        if (count($matches) < 3) {
+            self::write_brand_log("Adding title fuzzy matches as backup...");
+            $title_matches = self::add_title_fuzzy_matches($supplier_title, $brand_filtered_products, $supplier_keywords, $threshold * 0.8);
+            $matches = array_merge($matches, $title_matches);
+        }
+        
+        // Step 7: Sort by score and remove duplicates
+        $matches = self::deduplicate_and_sort_matches($matches);
+        
+        // Step 8: Learn from successful matches
+        if (!empty($matches) && class_exists('KT_Cigar_Learning_System')) {
+            self::learn_from_matches($supplier_keywords, $matches);
+        }
+        
+        self::write_brand_log("=== INTELLIGENT MATCHING END: " . count($matches) . " matches ===");
+        
+        return $matches;
+    }
+    
+    /**
+     * Find supplier product in database by title
+     */
+    private static function find_supplier_product_by_title($title) {
+        global $wpdb;
+        
+        $supplier_table = $wpdb->prefix . 'kt_cigar_supplier_products';
+        $product = $wpdb->get_row($wpdb->prepare("
+            SELECT * FROM $supplier_table 
+            WHERE supplier_title = %s 
+            LIMIT 1
+        ", $title), ARRAY_A);
+        
+        return $product;
+    }
+    
+    /**
+     * Parse serialized keywords into associative array
+     */
+    private static function parse_keywords($keywords_data) {
+        if (empty($keywords_data)) {
+            return array();
+        }
+        
+        // Handle serialized data
+        $keywords_array = maybe_unserialize($keywords_data);
+        if (!is_array($keywords_array)) {
+            return array();
+        }
+        
+        $parsed = array();
+        foreach ($keywords_array as $keyword) {
+            if (strpos($keyword, ':') !== false) {
+                list($type, $value) = explode(':', $keyword, 2);
+                $parsed[$type][] = $value;
+            }
+        }
+        
+        return $parsed;
+    }
+    
+    /**
+     * Get first value for a keyword type
+     */
+    private static function get_keyword_value($keywords, $type) {
+        return isset($keywords[$type]) && !empty($keywords[$type]) ? $keywords[$type][0] : null;
+    }
+    
+    /**
+     * Filter master products by brand keyword
+     */
+   private static function filter_by_brand_keyword($internal_products, $supplier_brand) {
+    $filtered = array();
+    
+    foreach ($internal_products as $product) {
+        $master_keywords = self::parse_keywords($product['extracted_keywords']);
+        $master_brand = self::get_keyword_value($master_keywords, 'BRAND');
+        
+        // Also check the direct brand field as fallback
+        if (!$master_brand && !empty($product['brand'])) {
+            $master_brand = $product['brand'];
+        }
+        
+        if ($master_brand && self::brands_match_intelligent($supplier_brand, $master_brand)) {
+            $filtered[] = $product;
+        }
+    }
+    
+    return $filtered;
+}
+	
+	
+    
+    /**
+     * Fuzzy filter by brand when exact matching fails
+     */
+    private static function fuzzy_filter_by_brand($internal_products, $supplier_brand) {
+        $filtered = array();
+        
+        foreach ($internal_products as $product) {
+            $master_keywords = self::parse_keywords($product['extracted_keywords']);
+            $master_brand = self::get_keyword_value($master_keywords, 'BRAND');
+            
+            if ($master_brand && self::brands_match_fuzzy($supplier_brand, $master_brand)) {
+                $filtered[] = $product;
+            }
+        }
+        
+        return $filtered;
+    }
+    
+    /**
+     * Exact brand matching
+     */
+    private static function brands_match_exact($brand1, $brand2) {
+    if (empty($brand1) || empty($brand2)) {
+        return false;
+    }
+    
+    $b1 = mb_strtolower(trim($brand1), 'UTF-8');
+    $b2 = mb_strtolower(trim($brand2), 'UTF-8');
+    
+    // Remove only punctuation, preserve all words
+    $b1_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b1);
+    $b1_clean = preg_replace('/\s+/', ' ', trim($b1_clean));
+    
+    $b2_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b2);
+    $b2_clean = preg_replace('/\s+/', ' ', trim($b2_clean));
+    
+    // EXACT match required
+    return $b1_clean === $b2_clean;
+}
+  /**
+ * Intelligent brand matching that handles bilingual brands
+ */
+/**
+ * Intelligent brand matching that preserves country distinctions from datafile
+ */
+private static function brands_match_intelligent($brand1, $brand2) {
+    if (empty($brand1) || empty($brand2)) {
+        return false;
+    }
+    
+    // CRITICAL: DO NOT remove country indicators!
+    // The datafile properly separates 'cohiba dominican' vs 'cohiba' (Cuban)
+    // The datafile properly separates 'montecristo nicaragua' vs 'montecristo' (Cuban)
+    // These distinctions are important for accurate matching
+    
+    // First try exact match to preserve datafile distinctions
+    if (self::brands_match_exact($brand1, $brand2)) {
+        return true;
+    }
+    
+    // Second try flexible match but still preserve important distinctions
+    $b1_lower = mb_strtolower(trim($brand1), 'UTF-8');
+    $b2_lower = mb_strtolower(trim($brand2), 'UTF-8');
+    
+    // Clean only punctuation, preserve all words including country indicators
+    $b1_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b1_lower);
+    $b1_clean = preg_replace('/\s+/', ' ', trim($b1_clean));
+    
+    $b2_clean = preg_replace('/[^\p{L}\p{N}\s]/u', ' ', $b2_lower);
+    $b2_clean = preg_replace('/\s+/', ' ', trim($b2_clean));
+    
+    // If they match after basic cleaning, that's good
+    if ($b1_clean === $b2_clean) {
+        return true;
+    }
+    
+    // For partial matching, be very strict to avoid wrong brand mappings
+    // Only allow if one completely contains the other AND coverage is high
+    $b1_len = mb_strlen($b1_clean, 'UTF-8');
+    $b2_len = mb_strlen($b2_clean, 'UTF-8');
+    
+    if ($b1_len >= 4 && $b2_len >= 4) {
+        if (strpos($b1_clean, $b2_clean) !== false) {
+            $coverage = $b2_len / $b1_len;
+            return $coverage >= 0.85; // 85% coverage required
+        }
+        if (strpos($b2_clean, $b1_clean) !== false) {
+            $coverage = $b1_len / $b2_len;
+            return $coverage >= 0.85; // 85% coverage required
+        }
+    }
+    
+    return false;
+}
+	
+	
+	
+	
+    /**
+     * Fuzzy brand matching
+     */
+    private static function brands_match_fuzzy($brand1, $brand2) {
+        if (empty($brand1) || empty($brand2)) {
+            return false;
+        }
+        
+        $b1 = strtolower(trim($brand1));
+        $b2 = strtolower(trim($brand2));
+        
+        // Contains matching
+        if (strpos($b1, $b2) !== false || strpos($b2, $b1) !== false) {
+            return true;
+        }
+        
+        // Similarity matching
+        $similarity = 0;
+        similar_text($b1, $b2, $similarity);
+        return $similarity >= 80;
+    }
+    
+    /**
+     * CORE: Calculate keyword similarity between supplier and master products
+     */
+    private static function calculate_keyword_similarity($supplier_keywords, $master_keywords) {
+        $total_score = 0;
+        $weight_sum = 0;
+        
+        // Define keyword weights (importance)
+       $weights = array(
+    'SERIES' => 0.30,     // 30% - HIGHEST PRIORITY for differentiation (#2 vs #3)
+    'MODEL' => 0.25,      // 25% - Model codes (VF52, T52, 1518) 
+    'BRAND' => 0.20,      // 20% - Must match for filtering
+    'YEAR' => 0.15,       // 15% - Years are critical (1998 vs 2023)
+    'VITOLA' => 0.08,     // 8% - Shape/size (less critical if series matches)
+    'RING' => 0.01,       // 1% - Dimensions least important
+    'LENGTH' => 0.01      // 1% - Dimensions least important
+);
+        
+        self::write_brand_log("🔍 Calculating keyword similarity...");
+        
+        foreach ($weights as $keyword_type => $weight) {
+            $supplier_values = isset($supplier_keywords[$keyword_type]) ? $supplier_keywords[$keyword_type] : array();
+            $master_values = isset($master_keywords[$keyword_type]) ? $master_keywords[$keyword_type] : array();
+            
+            if (empty($supplier_values) && empty($master_values)) {
+                continue; // Skip if both are empty
+            }
+            
+            $keyword_score = self::compare_keyword_values($supplier_values, $master_values, $keyword_type);
+            $weighted_score = $keyword_score * $weight;
+            
+            $total_score += $weighted_score;
+            $weight_sum += $weight;
+            
+            self::write_brand_log("  $keyword_type: " . round($keyword_score * 100, 1) . "% (weight: $weight, contribution: " . round($weighted_score * 100, 1) . "%)");
+        }
+        
+        // Handle Chinese keywords matching
+        $chinese_bonus = self::calculate_chinese_keyword_bonus($supplier_keywords, $master_keywords);
+        if ($chinese_bonus > 0) {
+            $total_score += $chinese_bonus * 0.1; // 10% bonus for Chinese matches
+            $weight_sum += 0.1;
+            self::write_brand_log("  CHINESE BONUS: " . round($chinese_bonus * 100, 1) . "%");
+        }
+        
+        $final_score = $weight_sum > 0 ? ($total_score / $weight_sum) : 0;
+        
+        self::write_brand_log("📊 Final similarity score: " . round($final_score * 100, 1) . "%");
+        
+        return $final_score;
+    }
+    
+    /**
+     * Compare specific keyword values
+     */
+    private static function compare_keyword_values($supplier_values, $master_values, $keyword_type) {
+        if (empty($supplier_values) || empty($master_values)) {
+    // CRITICAL: Zero tolerance for missing critical differentiators
+    switch ($keyword_type) {
+        case 'SERIES':
+        case 'MODEL': 
+        case 'YEAR':
+            return 0.0; // ZERO score - these MUST match
+        default:
+            return 0.2; // Small penalty for other missing data
+    }
+}
+        
+        $best_match = 0;
+        
+        foreach ($supplier_values as $s_value) {
+            foreach ($master_values as $m_value) {
+                $match_score = self::calculate_value_similarity($s_value, $m_value, $keyword_type);
+                $best_match = max($best_match, $match_score);
+            }
+        }
+        
+        return $best_match;
+   }
+    
+    /**
+     * Calculate similarity between two specific values
+     */
+    private static function calculate_value_similarity($value1, $value2, $keyword_type) {
+        if (empty($value1) || empty($value2)) {
+            return 0;
+        }
+        
+        $v1 = strtolower(trim($value1));
+        $v2 = strtolower(trim($value2));
+        
+        // Exact match
+        if ($v1 === $v2) {
+            return 1.0;
+        }
+        
+        // Type-specific matching
+        switch ($keyword_type) {
+            case 'SERIES':
+                return self::compare_series_values($v1, $v2);
+                
+            case 'MODEL':
+                return self::compare_model_values($v1, $v2);
+                
+            case 'YEAR':
+                return self::compare_year_values($v1, $v2);
+                
+            case 'RING':
+            case 'LENGTH':
+                return self::compare_numeric_values($v1, $v2);
+                
+            case 'COUNT':
+                return self::compare_count_values($v1, $v2);
+                
+            case 'VITOLA':
+            default:
+                return self::compare_text_values($v1, $v2);
+        }
+    }
+    
+    /**
+     * Compare numeric values (dimensions)
+     */
+    private static function compare_numeric_values($val1, $val2) {
+        $num1 = floatval($val1);
+        $num2 = floatval($val2);
+        
+        if ($num1 == 0 || $num2 == 0) {
+            return 0;
+        }
+        
+        $diff = abs($num1 - $num2);
+        $avg = ($num1 + $num2) / 2;
+        $tolerance = $avg * 0.05; // 5% tolerance
+        
+        if ($diff <= $tolerance) {
+            return 1.0;
+        } elseif ($diff <= $tolerance * 2) {
+            return 0.8;
+        } elseif ($diff <= $tolerance * 4) {
+            return 0.5;
+        } else {
+            return 0.1;
+        }
+    }
+    
+    /**
+     * Compare count values
+     */
+    private static function compare_count_values($val1, $val2) {
+        $num1 = intval($val1);
+        $num2 = intval($val2);
+        
+        if ($num1 == $num2) {
+            return 1.0;
+        }
+        
+        $diff = abs($num1 - $num2);
+        if ($diff <= 1) {
+            return 0.9;
+        } elseif ($diff <= 5) {
+            return 0.7;
+        } elseif ($diff <= 10) {
+            return 0.4;
+        } else {
+            return 0.1;
+        }
+    }
+    
+    /**
+     * Compare text values (vitola, series, etc.)
+     */
+    private static function compare_text_values($val1, $val2) {
+        // Exact match
+        if ($val1 === $val2) {
+            return 1.0;
+        }
+        
+        // Contains matching
+        if (strpos($val1, $val2) !== false || strpos($val2, $val1) !== false) {
+            return 0.8;
+        }
+        
+        // Similarity matching
+        $similarity = 0;
+        similar_text($val1, $val2, $similarity);
+        
+        if ($similarity >= 90) {
+            return 0.9;
+        } elseif ($similarity >= 70) {
+            return 0.7;
+        } elseif ($similarity >= 50) {
+            return 0.5;
+        } else {
+            return 0.2;
+        }
+    }
+ 
+/**
+ * CRITICAL: Exact series matching only
+ */
+private static function compare_series_values($val1, $val2) {
+    if (empty($val1) || empty($val2)) {
+        return 0;
+    }
+    
+    $v1 = strtolower(trim($val1));
+    $v2 = strtolower(trim($val2));
+    
+    // Handle series number equivalencies (#2 = No.2 = 2)
+    $v1_clean = preg_replace('/^(#|no\.?|号)\s*/', '', $v1);
+    $v2_clean = preg_replace('/^(#|no\.?|号)\s*/', '', $v2);
+    
+    if ($v1_clean === $v2_clean && (is_numeric($v1_clean) || strlen($v1_clean) >= 2)) {
+        return 1.0; // Perfect match
+    }
+    
+    if ($v1 === $v2) {
+        return 1.0; // Exact match
+    }
+    
+    return 0.0; // No partial matches for series
+}
+
+/**
+ * CRITICAL: Exact model matching only
+ */
+private static function compare_model_values($val1, $val2) {
+    if (empty($val1) || empty($val2)) {
+        return 0;
+    }
+    
+    $v1 = strtoupper(trim($val1));
+    $v2 = strtoupper(trim($val2));
+    
+    return ($v1 === $v2) ? 1.0 : 0.0; // Only exact matches
+}
+
+/**
+ * CRITICAL: Exact year matching only
+ */
+private static function compare_year_values($val1, $val2) {
+    if (empty($val1) || empty($val2)) {
+        return 0;
+    }
+    
+    $year1 = intval($val1);
+    $year2 = intval($val2);
+    
+    return ($year1 === $year2) ? 1.0 : 0.0; // Only exact year matches
+}	
+	
+	
+	
+	
+	
+	
+	
+    /**
+     * Calculate bonus for Chinese keyword matches
+     */
+    private static function calculate_chinese_keyword_bonus($supplier_keywords, $master_keywords) {
+        $supplier_chinese = isset($supplier_keywords['CHINESE']) ? $supplier_keywords['CHINESE'] : array();
+        $master_chinese = isset($master_keywords['CHINESE']) ? $master_keywords['CHINESE'] : array();
+        
+        if (empty($supplier_chinese) || empty($master_chinese)) {
+            return 0;
+        }
+        
+        $matches = 0;
+        $total_comparisons = 0;
+        
+        foreach ($supplier_chinese as $s_chinese) {
+            foreach ($master_chinese as $m_chinese) {
+                $total_comparisons++;
+                if (mb_strpos($s_chinese, $m_chinese) !== false || mb_strpos($m_chinese, $s_chinese) !== false) {
+                    $matches++;
+                }
+            }
+        }
+        
+        return $total_comparisons > 0 ? ($matches / $total_comparisons) : 0;
+    }
+    
+    /**
+     * Add title fuzzy matches as backup
+     */
+    private static function add_title_fuzzy_matches($supplier_title, $filtered_products, $supplier_keywords, $threshold) {
+        $title_matches = array();
+        
+        foreach ($filtered_products as $master_product) {
+            $master_title = $master_product['product_title'] ?? '';
+            $title_similarity = self::calculate_title_similarity($supplier_title, $master_title);
+            
+            if ($title_similarity >= $threshold) {
+                $master_keywords = self::parse_keywords($master_product['extracted_keywords']);
+                
+                $title_matches[] = array(
+                    'internal_product' => $master_product,
+                    'score' => round($title_similarity * 100, 1),
+                    'method' => 'title_fuzzy_backup',
+                    'match_details' => array(
+                        'title_similarity' => $title_similarity,
+                        'method' => 'backup_title_matching'
+                    )
+                );
+                
+                self::write_brand_log("TITLE BACKUP MATCH: $master_title | Score: " . round($title_similarity * 100, 1) . "%");
+            }
+        }
+        
+        return $title_matches;
+    }
+    
+    /**
+     * Calculate title similarity
+     */
+    private static function calculate_title_similarity($title1, $title2) {
+        if (empty($title1) || empty($title2)) {
+            return 0;
+        }
+        
+        $similarity = 0;
+        similar_text(strtolower($title1), strtolower($title2), $similarity);
+        return $similarity / 100;
+    }
+    
+    /**
+     * Remove duplicates and sort matches
+     */
+    private static function deduplicate_and_sort_matches($matches) {
+        // Remove duplicates based on internal product ID
+        $seen_ids = array();
+        $unique_matches = array();
+        
+        foreach ($matches as $match) {
+            $product_id = $match['internal_product']['id'] ?? 0;
+            
+            if (!in_array($product_id, $seen_ids)) {
+                $seen_ids[] = $product_id;
+                $unique_matches[] = $match;
+            } elseif ($match['score'] > $unique_matches[array_search($product_id, $seen_ids)]['score']) {
+                // Replace with higher scoring match
+                $index = array_search($product_id, $seen_ids);
+                $unique_matches[$index] = $match;
+            }
+        }
+        
+        // Sort by score (highest first)
+        usort($unique_matches, function($a, $b) {
+            return $b['score'] <=> $a['score'];
+        });
+        
+        return $unique_matches;
+    }
+    
+    /**
+     * Learn from successful matches using learning system
+     */
+    private static function learn_from_matches($supplier_keywords, $matches) {
+        if (!class_exists('KT_Cigar_Learning_System')) {
+            return;
+        }
+        
+        foreach ($matches as $match) {
+            if ($match['score'] >= 70) { // Only learn from high-confidence matches
+                $master_keywords = self::parse_keywords($match['internal_product']['extracted_keywords']);
+                
+                // Learn successful keyword patterns
+                foreach ($supplier_keywords as $type => $values) {
+                    if (isset($master_keywords[$type])) {
+                        foreach ($values as $value) {
+                            KT_Cigar_Learning_System::learn_successful_pattern(
+                                $value,
+                                strtolower($type),
+                                $master_keywords[$type][0],
+                                'keyword_matching'
+                            );
+                        }
+                    }
+                }
+                
+                self::write_brand_log("✅ Learned from successful match: " . $match['internal_product']['product_title']);
+            }
+        }
+    }
+    
+    /**
+     * Get detailed match information
+     */
+    private static function get_keyword_match_details($supplier_keywords, $master_keywords, $score) {
+        return array(
+            'final_score' => round($score * 100, 1),
+            'supplier_keywords_count' => count($supplier_keywords),
+            'master_keywords_count' => count($master_keywords),
+            'matching_keyword_types' => self::get_matching_keyword_types($supplier_keywords, $master_keywords),
+            'method' => 'intelligent_keyword_matching'
+        );
+    }
+    
+    /**
+     * Get list of matching keyword types
+     */
+    private static function get_matching_keyword_types($supplier_keywords, $master_keywords) {
+        $matching_types = array();
+        
+        foreach ($supplier_keywords as $type => $values) {
+            if (isset($master_keywords[$type]) && !empty($master_keywords[$type])) {
+                $matching_types[] = $type;
+            }
+        }
+        
+        return $matching_types;
+    }
+    
+    /**
+     * Write debug log
+     */
+    private static function write_brand_log($message) {
+        if (self::$debug_enabled && defined('KT_DEBUG') && KT_DEBUG) {
+            $log_file = WP_CONTENT_DIR . '/cigar-debug.log';
+            $timestamp = date('Y-m-d H:i:s');
+            $log_message = "$timestamp - [INTELLIGENT_MATCHER] $message\n";
+            file_put_contents($log_file, $log_message, FILE_APPEND | LOCK_EX);
+        }
+    }
+}
