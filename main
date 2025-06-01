@@ -2668,7 +2668,7 @@ public function handle_process_master_products() {
              $supplier_product->supplier_title,
              $supplier_product->supplier_brand ?? '',
              $master_products,
-             0.3 // Low threshold for testing
+             0.75 // Low threshold for testing
          );
          
          $this->write_admin_log("Found " . count($matches) . " matches");
@@ -3569,7 +3569,7 @@ public function handle_run_auto_matching() {
                 $supplier->supplier_title,
                 $supplier->supplier_brand ?? '',
                 $master_products,
-                0.3 // Lower threshold to capture more possibilities
+                0.75 // Lower threshold to capture more possibilities
             );
             
             if (!empty($matches)) {
@@ -3587,25 +3587,24 @@ $master_product_title = $best_match['internal_product']['product_title'] ?? '';
 				
 				
 				
-                // Categorize matches by confidence
-                if ($confidence >= 85) {
-                    // Perfect match - auto-map
-                   $mapping_result = $wpdb->insert(
-    $wpdb->prefix . 'kt_cigar_product_mappings',
-    array(
-        'supplier_product_id' => $supplier->id,
-        'supplier_sku' => $supplier->supplier_sku,
-        'supplier_title' => $supplier->supplier_title,
-        'master_product_id' => $master_product_id,
-        'master_product_sku' => $master_product_sku,
-        'master_product_title' => $master_product_title,
-                            'mapping_type' => 'perfect_auto',
-                            'confidence_score' => $confidence,
-                            'mapping_details' => maybe_serialize($best_match['match_details'] ?? array()),
-                            'created_by' => get_current_user_id()
-                        )
-                    );
-                    
+            // Categorize matches by confidence - STRICTER THRESHOLDS
+if ($confidence >= 95) {
+    // Perfect match - auto-map (raised from 85 to 95)
+   $mapping_result = $wpdb->insert(
+$wpdb->prefix . 'kt_cigar_product_mappings',
+array(
+    'supplier_product_id' => $supplier->id,
+    'supplier_sku' => $supplier->supplier_sku,
+    'supplier_title' => $supplier->supplier_title,
+    'master_product_id' => $master_product_id,
+    'master_product_sku' => $master_product_sku,
+    'master_product_title' => $master_product_title,
+                        'mapping_type' => 'perfect_auto',
+                        'confidence_score' => $confidence,
+                        'mapping_details' => maybe_serialize($best_match['match_details'] ?? array()),
+                        'created_by' => get_current_user_id()
+                    )
+                );
                  if ($mapping_result) {
     $wpdb->update(
         $wpdb->prefix . 'kt_cigar_supplier_products',
@@ -3620,36 +3619,36 @@ $master_product_title = $best_match['internal_product']['product_title'] ?? '';
     $perfect_matches++;
 }
 					
-                } elseif ($confidence >= 65) {
-                    // Close match - needs review
-                    $wpdb->update(
-                        $wpdb->prefix . 'kt_cigar_supplier_products',
-                        array(
-                            'mapping_status' => 'close_match',
-                            'mapping_confidence' => $confidence,
-                            'processed_data' => maybe_serialize(array(
-                                'suggested_matches' => array_slice($matches, 0, 5), // Top 5 suggestions
-                                'confidence_level' => 'close'
-                            ))
-                        ),
-                        array('id' => $supplier->id)
-                    );
-                    $close_matches++;
-                } elseif ($confidence >= 40) {
-                    // Possible match - needs manual review
-                    $wpdb->update(
-                        $wpdb->prefix . 'kt_cigar_supplier_products',
-                        array(
-                            'mapping_status' => 'possible_match',
-                            'mapping_confidence' => $confidence,
-                            'processed_data' => maybe_serialize(array(
-                                'suggested_matches' => array_slice($matches, 0, 10), // Top 10 suggestions
-                                'confidence_level' => 'possible'
-                            ))
-                        ),
-                        array('id' => $supplier->id)
-                    );
-                    $possible_matches++;
+             } elseif ($confidence >= 85) {
+    // Close match - needs review (raised from 65 to 85)
+    $wpdb->update(
+        $wpdb->prefix . 'kt_cigar_supplier_products',
+        array(
+            'mapping_status' => 'close_match',
+            'mapping_confidence' => $confidence,
+            'processed_data' => maybe_serialize(array(
+                'suggested_matches' => array_slice($matches, 0, 3), // Top 3 suggestions (reduced from 5)
+                'confidence_level' => 'close'
+            ))
+        ),
+        array('id' => $supplier->id)
+    );
+    $close_matches++;
+} elseif ($confidence >= 70) {
+    // Possible match - needs manual review (raised from 40 to 70)
+    $wpdb->update(
+        $wpdb->prefix . 'kt_cigar_supplier_products',
+        array(
+            'mapping_status' => 'possible_match',
+            'mapping_confidence' => $confidence,
+            'processed_data' => maybe_serialize(array(
+                'suggested_matches' => array_slice($matches, 0, 5), // Top 5 suggestions (reduced from 10)
+                'confidence_level' => 'possible'
+            ))
+        ),
+        array('id' => $supplier->id)
+    );
+    $possible_matches++;
                 } else {
                     // Low confidence - needs manual mapping or new product creation
                     $wpdb->update(
